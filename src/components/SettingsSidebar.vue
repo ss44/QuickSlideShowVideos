@@ -18,19 +18,24 @@ import type {
   OutputConfig,
   SmartEffectsConfig,
   TimingConfig,
+  TransitionOrderMode,
   TransitionType,
 } from '../types/slideshow'
 import {
   COLOR_LOOK_OPTIONS,
+  FIT_MODE_OPTIONS,
+  FRAME_RATE_OPTIONS,
+  OUTPUT_FORMAT_OPTIONS,
   RESOLUTION_PRESETS,
   TRANSITION_OPTIONS,
+  VIDEO_QUALITY_OPTIONS,
 } from '../types/slideshow'
-import { formatTime } from '../engine/timeline'
+import { formatTime } from '../utils/formatters'
 
 const props = defineProps<{
   timing: TimingConfig
   selectedTransitions: TransitionType[]
-  transitionOrder: 'cycle' | 'random'
+  transitionOrder: TransitionOrderMode
   effects: SmartEffectsConfig
   music: MusicConfig
   output: OutputConfig
@@ -41,7 +46,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'toggleTransition', type: TransitionType): void
   (e: 'selectAllTransitions'): void
-  (e: 'update:transitionOrder', order: 'cycle' | 'random'): void
+  (e: 'update:transitionOrder', order: TransitionOrderMode): void
   (e: 'loadMusicFile', file: File): void
   (e: 'loadMusicUrl', url: string): void
   (e: 'clearMusic'): void
@@ -59,22 +64,23 @@ const openSections = ref<Record<string, boolean>>({
 const musicUrlInput = ref('')
 const musicFileRef = ref<HTMLInputElement | null>(null)
 
-function toggleSection(key: string) {
-  openSections.value[key] = !openSections.value[key]
+function toggleSection(sectionKey: string) {
+  openSections.value[sectionKey] = !openSections.value[sectionKey]
 }
 
-function onMusicFileChange(e: Event) {
-  const input = e.target as HTMLInputElement
-  const file = input.files?.[0]
-  if (file) {
-    emit('loadMusicFile', file)
+function onMusicFileChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const selectedFile = input.files?.[0]
+  if (selectedFile) {
+    emit('loadMusicFile', selectedFile)
     input.value = ''
   }
 }
 
 function submitMusicUrl() {
-  if (!musicUrlInput.value.trim()) return
-  emit('loadMusicUrl', musicUrlInput.value.trim())
+  const trimmedUrl = musicUrlInput.value.trim()
+  if (!trimmedUrl) return
+  emit('loadMusicUrl', trimmedUrl)
 }
 </script>
 
@@ -117,7 +123,7 @@ function submitMusicUrl() {
         </label>
 
         <!-- Slide duration -->
-        <div :class="{ 'opacity-45 pointer-events-none': props.timing.matchMusicLength }">
+        <div :class="{ 'pointer-events-none opacity-45': props.timing.matchMusicLength }">
           <div class="mb-1.5 flex items-center justify-between text-xs">
             <span class="text-zinc-300">Slide Duration</span>
             <span class="font-mono text-zinc-100">{{ props.timing.slideDuration.toFixed(1) }}s</span>
@@ -173,18 +179,18 @@ function submitMusicUrl() {
       <div v-if="openSections.transitions" class="space-y-3 px-4 pb-4">
         <div class="flex flex-wrap gap-1.5">
           <button
-            v-for="opt in TRANSITION_OPTIONS"
-            :key="opt.id"
+            v-for="option in TRANSITION_OPTIONS"
+            :key="option.id"
             type="button"
             class="rounded-md border px-2.5 py-1 text-xs font-medium transition"
             :class="
-              props.selectedTransitions.includes(opt.id)
+              props.selectedTransitions.includes(option.id)
                 ? 'border-indigo-500/70 bg-indigo-500/20 text-indigo-200'
                 : 'border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200'
             "
-            @click="emit('toggleTransition', opt.id)"
+            @click="emit('toggleTransition', option.id)"
           >
-            {{ opt.label }}
+            {{ option.label }}
           </button>
         </div>
 
@@ -250,11 +256,7 @@ function submitMusicUrl() {
           <label class="mb-1.5 block text-xs text-zinc-300">Smart Framing</label>
           <div class="grid grid-cols-3 gap-1.5">
             <button
-              v-for="mode in [
-                { id: 'blur-fill', label: 'Blur Fill' },
-                { id: 'cover', label: 'Crop Fill' },
-                { id: 'contain', label: 'Black Bars' },
-              ] as const"
+              v-for="mode in FIT_MODE_OPTIONS"
               :key="mode.id"
               type="button"
               class="rounded-md border px-2 py-1.5 text-xs font-medium transition"
@@ -302,7 +304,7 @@ function submitMusicUrl() {
         <!-- Beat Sync -->
         <label
           class="flex items-center justify-between rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-2.5"
-          :class="props.music.audioBuffer ? 'cursor-pointer' : 'opacity-50 cursor-not-allowed'"
+          :class="props.music.audioBuffer ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'"
         >
           <div>
             <div class="flex items-center gap-1.5 text-xs font-medium text-zinc-200">
@@ -524,26 +526,23 @@ function submitMusicUrl() {
       </button>
 
       <div v-if="openSections.output" class="space-y-3.5 px-4 pb-5">
-        <!-- Format -->
+        <!-- Container Format -->
         <div>
           <label class="mb-1.5 block text-xs text-zinc-300">Container</label>
           <div class="grid grid-cols-2 gap-1.5">
             <button
-              v-for="fmt in [
-                { id: 'mp4', label: 'MP4 (H.264)' },
-                { id: 'webm', label: 'WebM (VP9)' },
-              ] as const"
-              :key="fmt.id"
+              v-for="formatOption in OUTPUT_FORMAT_OPTIONS"
+              :key="formatOption.id"
               type="button"
               class="rounded-md border px-2.5 py-1.5 text-xs font-medium transition"
               :class="
-                props.output.format === fmt.id
+                props.output.format === formatOption.id
                   ? 'border-indigo-500/70 bg-indigo-500/20 text-indigo-200'
                   : 'border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-zinc-200'
               "
-              @click="props.output.format = fmt.id"
+              @click="props.output.format = formatOption.id"
             >
-              {{ fmt.label }}
+              {{ formatOption.label }}
             </button>
           </div>
         </div>
@@ -579,18 +578,18 @@ function submitMusicUrl() {
             <label class="mb-1 block text-xs text-zinc-300">Frame Rate</label>
             <div class="grid grid-cols-2 gap-1">
               <button
-                v-for="fps in [30, 60] as const"
-                :key="fps"
+                v-for="fpsOption in FRAME_RATE_OPTIONS"
+                :key="fpsOption"
                 type="button"
                 class="rounded-md border py-1 text-xs font-medium transition"
                 :class="
-                  props.output.fps === fps
+                  props.output.fps === fpsOption
                     ? 'border-indigo-500/70 bg-indigo-500/20 text-indigo-200'
                     : 'border-zinc-800 bg-zinc-900/60 text-zinc-400'
                 "
-                @click="props.output.fps = fps"
+                @click="props.output.fps = fpsOption"
               >
-                {{ fps }} fps
+                {{ fpsOption }} fps
               </button>
             </div>
           </div>
@@ -599,21 +598,18 @@ function submitMusicUrl() {
             <label class="mb-1 block text-xs text-zinc-300">Quality</label>
             <div class="grid grid-cols-2 gap-1">
               <button
-                v-for="q in [
-                  { id: 'standard', label: 'Std' },
-                  { id: 'high', label: 'High' },
-                ] as const"
-                :key="q.id"
+                v-for="qualityOption in VIDEO_QUALITY_OPTIONS"
+                :key="qualityOption.id"
                 type="button"
                 class="rounded-md border py-1 text-xs font-medium transition"
                 :class="
-                  props.output.quality === q.id
+                  props.output.quality === qualityOption.id
                     ? 'border-indigo-500/70 bg-indigo-500/20 text-indigo-200'
                     : 'border-zinc-800 bg-zinc-900/60 text-zinc-400'
                 "
-                @click="props.output.quality = q.id"
+                @click="props.output.quality = qualityOption.id"
               >
-                {{ q.label }}
+                {{ qualityOption.label }}
               </button>
             </div>
           </div>

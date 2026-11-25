@@ -10,7 +10,8 @@ import {
   Minimize2,
   GripVertical,
 } from 'lucide-vue-next'
-import type { SlideImage } from '../types/slideshow'
+import type { SlideImage, SlideSortMode } from '../types/slideshow'
+import { SLIDE_SORT_OPTIONS } from '../types/slideshow'
 
 const props = defineProps<{
   slides: SlideImage[]
@@ -23,53 +24,53 @@ const emit = defineEmits<{
   (e: 'remove', id: string): void
   (e: 'rotate', id: string): void
   (e: 'reorder', fromIndex: number, toIndex: number): void
-  (e: 'sort', mode: 'name' | 'date-asc' | 'date-desc' | 'reverse' | 'shuffle'): void
+  (e: 'sort', mode: SlideSortMode): void
   (e: 'clearAll'): void
 }>()
 
-const expanded = ref(false)
-const draggedIndex = ref<number | null>(null)
-const dragOverIndex = ref<number | null>(null)
-const sortMenuOpen = ref(false)
+const isGridExpanded = ref(false)
+const draggedSlideIndex = ref<number | null>(null)
+const dragTargetSlideIndex = ref<number | null>(null)
+const isSortMenuOpen = ref(false)
 
-function onDragStart(e: DragEvent, index: number) {
-  draggedIndex.value = index
-  if (e.dataTransfer) {
-    e.dataTransfer.effectAllowed = 'move'
-    e.dataTransfer.setData('text/plain', String(index))
+function onDragStart(event: DragEvent, index: number) {
+  draggedSlideIndex.value = index
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', String(index))
   }
 }
 
-function onDragOver(e: DragEvent, index: number) {
-  e.preventDefault()
-  if (draggedIndex.value === null) return
-  dragOverIndex.value = index
+function onDragOver(event: DragEvent, index: number) {
+  event.preventDefault()
+  if (draggedSlideIndex.value === null) return
+  dragTargetSlideIndex.value = index
 }
 
-function onDrop(e: DragEvent, index: number) {
-  e.preventDefault()
-  if (draggedIndex.value !== null && draggedIndex.value !== index) {
-    emit('reorder', draggedIndex.value, index)
+function onDrop(event: DragEvent, targetIndex: number) {
+  event.preventDefault()
+  if (draggedSlideIndex.value !== null && draggedSlideIndex.value !== targetIndex) {
+    emit('reorder', draggedSlideIndex.value, targetIndex)
   }
-  draggedIndex.value = null
-  dragOverIndex.value = null
+  draggedSlideIndex.value = null
+  dragTargetSlideIndex.value = null
 }
 
 function onDragEnd() {
-  draggedIndex.value = null
-  dragOverIndex.value = null
+  draggedSlideIndex.value = null
+  dragTargetSlideIndex.value = null
 }
 
-function applySort(mode: 'name' | 'date-asc' | 'date-desc' | 'reverse' | 'shuffle') {
-  emit('sort', mode)
-  sortMenuOpen.value = false
+function applySortMode(sortMode: SlideSortMode) {
+  emit('sort', sortMode)
+  isSortMenuOpen.value = false
 }
 </script>
 
 <template>
   <section
     class="flex shrink-0 flex-col border-t border-zinc-800/80 bg-zinc-950 transition-all"
-    :class="expanded ? 'h-80' : 'h-44'"
+    :class="isGridExpanded ? 'h-80' : 'h-44'"
   >
     <!-- Filmstrip Header -->
     <div class="flex h-10 shrink-0 items-center justify-between border-b border-zinc-800/60 px-4">
@@ -98,48 +99,29 @@ function applySort(mode: 'name' | 'date-asc' | 'date-desc' | 'reverse' | 'shuffl
           <button
             type="button"
             class="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs text-zinc-300 transition hover:bg-zinc-800"
-            @click="sortMenuOpen = !sortMenuOpen"
+            @click="isSortMenuOpen = !isSortMenuOpen"
           >
             <ArrowUpDown class="h-3.5 w-3.5" />
             Sort
           </button>
 
           <div
-            v-if="sortMenuOpen"
+            v-if="isSortMenuOpen"
             class="absolute right-0 bottom-full z-30 mb-1.5 w-40 rounded-lg border border-zinc-800 bg-zinc-900 py-1 shadow-xl"
           >
             <button
+              v-for="sortOption in SLIDE_SORT_OPTIONS"
+              :key="sortOption.id"
               type="button"
               class="block w-full px-3 py-1.5 text-left text-xs text-zinc-200 hover:bg-zinc-800"
-              @click="applySort('name')"
+              @click="applySortMode(sortOption.id)"
             >
-              Filename (A–Z)
-            </button>
-            <button
-              type="button"
-              class="block w-full px-3 py-1.5 text-left text-xs text-zinc-200 hover:bg-zinc-800"
-              @click="applySort('date-asc')"
-            >
-              Date (Oldest first)
-            </button>
-            <button
-              type="button"
-              class="block w-full px-3 py-1.5 text-left text-xs text-zinc-200 hover:bg-zinc-800"
-              @click="applySort('date-desc')"
-            >
-              Date (Newest first)
-            </button>
-            <button
-              type="button"
-              class="block w-full px-3 py-1.5 text-left text-xs text-zinc-200 hover:bg-zinc-800"
-              @click="applySort('reverse')"
-            >
-              Reverse Order
+              {{ sortOption.label }}
             </button>
             <button
               type="button"
               class="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-xs text-zinc-200 hover:bg-zinc-800"
-              @click="applySort('shuffle')"
+              @click="applySortMode('shuffle')"
             >
               <Shuffle class="h-3 w-3 text-indigo-400" />
               Shuffle
@@ -151,10 +133,10 @@ function applySort(mode: 'name' | 'date-asc' | 'date-desc' | 'reverse' | 'shuffl
           v-if="props.slides.length > 0"
           type="button"
           class="rounded-md border border-zinc-800 bg-zinc-900 p-1.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200"
-          :title="expanded ? 'Compact strip' : 'Expand grid'"
-          @click="expanded = !expanded"
+          :title="isGridExpanded ? 'Compact strip' : 'Expand grid'"
+          @click="isGridExpanded = !isGridExpanded"
         >
-          <Minimize2 v-if="expanded" class="h-3.5 w-3.5" />
+          <Minimize2 v-if="isGridExpanded" class="h-3.5 w-3.5" />
           <Maximize2 v-else class="h-3.5 w-3.5" />
         </button>
 
@@ -182,28 +164,30 @@ function applySort(mode: 'name' | 'date-asc' | 'date-desc' | 'reverse' | 'shuffl
       v-else
       class="flex-1 p-3"
       :class="
-        expanded
+        isGridExpanded
           ? 'grid grid-cols-3 gap-2.5 overflow-y-auto sm:grid-cols-5 md:grid-cols-7 lg:grid-cols-9'
           : 'flex items-center gap-2.5 overflow-x-auto overflow-y-hidden'
       "
     >
       <div
-        v-for="(slide, idx) in props.slides"
+        v-for="(slide, slideIndex) in props.slides"
         :key="slide.id"
         draggable="true"
         class="group relative shrink-0 cursor-pointer overflow-hidden rounded-lg border bg-zinc-900 transition"
         :class="[
-          expanded ? 'aspect-[4/3] w-full' : 'h-24 w-32',
-          idx === props.activeSlideIndex
+          isGridExpanded ? 'aspect-[4/3] w-full' : 'h-24 w-32',
+          slideIndex === props.activeSlideIndex
             ? 'border-indigo-500 ring-2 ring-indigo-500/40'
             : 'border-zinc-800 hover:border-zinc-600',
-          dragOverIndex === idx && draggedIndex !== idx ? 'ring-2 ring-amber-400 scale-[1.03]' : '',
-          draggedIndex === idx ? 'opacity-40' : '',
+          dragTargetSlideIndex === slideIndex && draggedSlideIndex !== slideIndex
+            ? 'scale-[1.03] ring-2 ring-amber-400'
+            : '',
+          draggedSlideIndex === slideIndex ? 'opacity-40' : '',
         ]"
-        @click="emit('jumpTo', idx)"
-        @dragstart="onDragStart($event, idx)"
-        @dragover="onDragOver($event, idx)"
-        @drop="onDrop($event, idx)"
+        @click="emit('jumpTo', slideIndex)"
+        @dragstart="onDragStart($event, slideIndex)"
+        @dragover="onDragOver($event, slideIndex)"
+        @drop="onDrop($event, slideIndex)"
         @dragend="onDragEnd"
       >
         <img
@@ -227,7 +211,7 @@ function applySort(mode: 'name' | 'date-asc' | 'date-desc' | 'reverse' | 'shuffl
         <span
           class="absolute bottom-1 left-1 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] font-medium text-zinc-200 backdrop-blur-xs"
         >
-          {{ idx + 1 }}
+          {{ slideIndex + 1 }}
         </span>
 
         <!-- Drag Handle Indicator -->

@@ -1,21 +1,56 @@
 import { computed, markRaw, reactive, ref } from 'vue'
 import type {
   MusicConfig,
+  MusicSourceType,
   OutputConfig,
   SlideImage,
+  SlideRotationDegrees,
+  SlideSortMode,
   SmartEffectsConfig,
   TimingConfig,
+  TransitionOrderMode,
   TransitionType,
 } from '../types/slideshow'
 import { RESOLUTION_PRESETS, TRANSITION_OPTIONS } from '../types/slideshow'
 import { thumbnailQueue } from '../engine/imageCache'
-import { computeTimeline, estimateFileSizeMB } from '../engine/timeline'
+import {
+  computeTimeline,
+  estimateFileSizeMB,
+  findSlideIndexAtTime,
+} from '../engine/timeline'
 import { decodeAudioFromFile, decodeAudioFromUrl, detectBeats } from '../engine/audioEngine'
 import { isImageFile } from '../utils/fileDrop'
 
-let idCounter = 1
-function nextId(): string {
-  return `slide-${Date.now().toString(36)}-${idCounter++}`
+let slideIdSequence = 1
+
+function generateUniqueSlideId(): string {
+  return `slide-${Date.now().toString(36)}-${slideIdSequence++}`
+}
+
+function createSlideImageFromFile(file: File): SlideImage {
+  return {
+    id: generateUniqueSlideId(),
+    file,
+    name: file.name,
+    size: file.size,
+    lastModified: file.lastModified,
+    width: 0,
+    height: 0,
+    thumbnailUrl: null,
+    rotation: 0,
+  }
+}
+
+function revokeSlideThumbnail(slide: SlideImage) {
+  if (slide.thumbnailUrl) {
+    URL.revokeObjectURL(slide.thumbnailUrl)
+  }
+}
+
+function extractTrackNameFromUrl(url: string): string {
+  const pathSegments = url.split('/')
+  const rawFilename = pathSegments[pathSegments.length - 1] || 'Audio Link'
+  return decodeURIComponent(rawFilename).split('?')[0]
 }
 
 export function useSlideshow() {
@@ -31,7 +66,7 @@ export function useSlideshow() {
   })
 
   const selectedTransitions = ref<TransitionType[]>(['crossfade', 'zoom-in', 'slide-left'])
-  const transitionOrder = ref<'cycle' | 'random'>('cycle')
+  const transitionOrder = ref<TransitionOrderMode>('cycle')
 
   const effects = reactive<SmartEffectsConfig>({
     kenBurns: true,
@@ -42,7 +77,7 @@ export function useSlideshow() {
     vignette: true,
   })
 
-  // Use markRaw on AudioBuffer when assigning so Vue doesn't proxy Web Audio internals
+  // Wrap decoded AudioBuffer instances in markRaw() before assignment so Vue does not deep-proxy Web Audio internals
   const music = reactive<MusicConfig>({
     sourceType: 'none',
     name: '',
@@ -83,64 +118,41 @@ export function useSlideshow() {
     estimateFileSizeMB(timeline.value.totalDuration, output, Boolean(music.audioBuffer)),
   )
 
-  const activeSlideIndex = computed(() => {
-    const list = timeline.value.slides
-    if (list.length === 0) return -1
-    const t = currentTime.value
-    if (t <= 0) return 0
-    if (t >= timeline.value.totalDuration) return list.length - 1
-    let lo = 0
-    let hi = list.length - 1
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1
-      const s = list[mid]
-      if (t < s.startTime) hi = mid - 1
-      else if (t >= s.endTime) lo = mid + 1
-      else return mid
-    }
-    return Math.min(list.length - 1, Math.max(0, lo))
-  })
+  const activeSlideIndex = computed(() =>
+    findSlideIndexAtTime(timeline.value, currentTime.value),
+  )
 
-  function addFiles(input: FileList | File[]) {
-    const valid = Array.from(input).filter(isImageFile)
-    if (valid.length === 0) return
+  function addFiles(inputFiles: FileList | File[]) {
+    const validImageFiles = Array.from(inputFiles).filter(isImageFile)
+    if (validImageFiles.length === 0) return
 
-    const newSlides: SlideImage[] = valid.map((file) => ({
-      id: nextId(),
-      file,
-      name: file.name,
-      size: file.size,
-      lastModified: file.lastModified,
-      width: 0,
-      height: 0,
-      thumbnailUrl: null,
-      rotation: 0,
-    }))
-
+    const newSlides = validImageFiles.map(createSlideImageFromFile)
     slides.value = [...slides.value, ...newSlides]
 
     for (const slide of newSlides) {
-      thumbnailQueue.enqueue(slide, (url, w, h) => {
-        const target = slides.value.find((s) => s.id === slide.id)
-        if (target) {
-          target.thumbnailUrl = url
-          target.width = w
-          target.height = h
+      thumbnailQueue.enqueue(slide, (thumbnailBlobUrl, naturalWidth, naturalHeight) => {
+        const targetSlide = slides.value.find((item) => item.id === slide.id)
+        if (targetSlide) {
+          targetSlide.thumbnailUrl = thumbnailBlobUrl
+          targetSlide.width = naturalWidth
+          targetSlide.height = naturalHeight
         } else {
-          URL.revokeObjectURL(url)
+          // Slide was removed before its asynchronous thumbnail completed
+          URL.revokeObjectURL(thumbnailBlobUrl)
         }
       })
     }
   }
 
-  function removeSlide(id: string) {
-    const idx = slides.value.findIndex((s) => s.id === id)
-    if (idx === -1) return
-    const removed = slides.value[idx]
-    if (removed.thumbnailUrl) URL.revokeObjectURL(removed.thumbnailUrl)
-    const next = slides.value.slice()
-    next.splice(idx, 1)
-    slides.value = next
+  function removeSlide(slideId: string) {
+    const indexToRemove = slides.value.findIndex((slide) => slide.id === slideId)
+    if (indexToRemove === -1) return
+
+    revokeSlideThumbnail(slides.value[indexToRemove])
+    const updatedSlides = slides.value.slice()
+    updatedSlides.splice(indexToRemove, 1)
+    slides.value = updatedSlides
+
     if (currentTime.value > timeline.value.totalDuration) {
       currentTime.value = Math.max(0, timeline.value.totalDuration - 0.01)
     }
@@ -150,110 +162,123 @@ export function useSlideshow() {
     }
   }
 
-  function rotateSlide(id: string) {
-    const target = slides.value.find((s) => s.id === id)
-    if (!target) return
-    target.rotation = (((target.rotation || 0) + 90) % 360) as 0 | 90 | 180 | 270
+  function rotateSlide(slideId: string) {
+    const targetSlide = slides.value.find((slide) => slide.id === slideId)
+    if (!targetSlide) return
+    targetSlide.rotation = (((targetSlide.rotation || 0) + 90) % 360) as SlideRotationDegrees
   }
 
   function reorderSlides(fromIndex: number, toIndex: number) {
-    if (
+    const isOutOfBounds =
       fromIndex === toIndex ||
       fromIndex < 0 ||
       toIndex < 0 ||
       fromIndex >= slides.value.length ||
       toIndex >= slides.value.length
-    ) {
-      return
-    }
-    const next = slides.value.slice()
-    const [moved] = next.splice(fromIndex, 1)
-    next.splice(toIndex, 0, moved)
-    slides.value = next
+    if (isOutOfBounds) return
+
+    const reordered = slides.value.slice()
+    const [movedSlide] = reordered.splice(fromIndex, 1)
+    reordered.splice(toIndex, 0, movedSlide)
+    slides.value = reordered
   }
 
-  function sortSlides(mode: 'name' | 'date-asc' | 'date-desc' | 'reverse' | 'shuffle') {
-    const next = slides.value.slice()
-    if (mode === 'name') {
-      next.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
-    } else if (mode === 'date-asc') {
-      next.sort((a, b) => a.lastModified - b.lastModified)
-    } else if (mode === 'date-desc') {
-      next.sort((a, b) => b.lastModified - a.lastModified)
-    } else if (mode === 'reverse') {
-      next.reverse()
-    } else if (mode === 'shuffle') {
-      for (let i = next.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1))
-        ;[next[i], next[j]] = [next[j], next[i]]
+  function sortSlides(sortMode: SlideSortMode) {
+    const sorted = slides.value.slice()
+    if (sortMode === 'name') {
+      sorted.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+    } else if (sortMode === 'date-asc') {
+      sorted.sort((a, b) => a.lastModified - b.lastModified)
+    } else if (sortMode === 'date-desc') {
+      sorted.sort((a, b) => b.lastModified - a.lastModified)
+    } else if (sortMode === 'reverse') {
+      sorted.reverse()
+    } else if (sortMode === 'shuffle') {
+      for (let i = sorted.length - 1; i > 0; i--) {
+        const randomIndex = Math.floor(Math.random() * (i + 1))
+        ;[sorted[i], sorted[randomIndex]] = [sorted[randomIndex], sorted[i]]
       }
     }
-    slides.value = next
+    slides.value = sorted
   }
 
   function clearAllSlides() {
     isPlaying.value = false
     currentTime.value = 0
     thumbnailQueue.clear()
-    for (const s of slides.value) {
-      if (s.thumbnailUrl) URL.revokeObjectURL(s.thumbnailUrl)
+    for (const slide of slides.value) {
+      revokeSlideThumbnail(slide)
     }
     slides.value = []
   }
 
-  function toggleTransition(type: TransitionType) {
-    const exists = selectedTransitions.value.includes(type)
-    if (exists) {
-      if (selectedTransitions.value.length === 1) return // always keep at least one
-      selectedTransitions.value = selectedTransitions.value.filter((t) => t !== type)
+  function toggleTransition(transitionType: TransitionType) {
+    const isCurrentlySelected = selectedTransitions.value.includes(transitionType)
+    if (isCurrentlySelected) {
+      if (selectedTransitions.value.length === 1) return // Ensure at least one transition remains active
+      selectedTransitions.value = selectedTransitions.value.filter(
+        (item) => item !== transitionType,
+      )
     } else {
-      selectedTransitions.value = [...selectedTransitions.value, type]
+      selectedTransitions.value = [...selectedTransitions.value, transitionType]
     }
   }
 
   function selectAllTransitions() {
-    selectedTransitions.value = TRANSITION_OPTIONS.filter((t) => t.id !== 'cut').map((t) => t.id)
+    selectedTransitions.value = TRANSITION_OPTIONS.filter((opt) => opt.id !== 'cut').map(
+      (opt) => opt.id,
+    )
   }
 
-  function setSingleTransition(type: TransitionType) {
-    selectedTransitions.value = [type]
+  function setSingleTransition(transitionType: TransitionType) {
+    selectedTransitions.value = [transitionType]
+  }
+
+  function applyLoadedAudioBuffer(
+    buffer: AudioBuffer,
+    sourceType: Exclude<MusicSourceType, 'none'>,
+    trackName: string,
+    sourceUrl: string,
+  ) {
+    music.audioBuffer = markRaw(buffer)
+    music.sourceType = sourceType
+    music.name = trackName
+    music.url = sourceUrl
+    music.duration = buffer.duration
+    music.startOffset = 0
+    music.beatTimes = detectBeats(buffer)
   }
 
   async function loadMusicFile(file: File) {
     music.loading = true
     music.error = null
     try {
-      const buffer = await decodeAudioFromFile(file)
-      music.audioBuffer = markRaw(buffer)
-      music.sourceType = 'file'
-      music.name = file.name
-      music.url = ''
-      music.duration = buffer.duration
-      music.startOffset = 0
-      music.beatTimes = detectBeats(buffer)
+      const decodedBuffer = await decodeAudioFromFile(file)
+      applyLoadedAudioBuffer(decodedBuffer, 'file', file.name, '')
     } catch (err) {
       music.error =
-        err instanceof Error ? err.message : 'Failed to decode audio file. Try MP3, WAV, M4A, or OGG.'
+        err instanceof Error
+          ? err.message
+          : 'Failed to decode audio file. Try MP3, WAV, M4A, or OGG.'
     } finally {
       music.loading = false
     }
   }
 
   async function loadMusicUrl(rawUrl: string) {
-    const trimmed = rawUrl.trim()
-    if (!trimmed) return
+    const trimmedUrl = rawUrl.trim()
+    if (!trimmedUrl) return
+
     music.loading = true
     music.error = null
     try {
-      const buffer = await decodeAudioFromUrl(trimmed)
-      music.audioBuffer = markRaw(buffer)
-      music.sourceType = 'url'
-      const urlParts = trimmed.split('/')
-      music.name = decodeURIComponent(urlParts[urlParts.length - 1] || 'Audio Link').split('?')[0]
-      music.url = trimmed
-      music.duration = buffer.duration
-      music.startOffset = 0
-      music.beatTimes = detectBeats(buffer)
+      const decodedBuffer = await decodeAudioFromUrl(trimmedUrl)
+      applyLoadedAudioBuffer(
+        decodedBuffer,
+        'url',
+        extractTrackNameFromUrl(trimmedUrl),
+        trimmedUrl,
+      )
     } catch (err) {
       music.error = err instanceof Error ? err.message : 'Could not load audio from URL.'
     } finally {
@@ -275,18 +300,22 @@ export function useSlideshow() {
   }
 
   function setResolutionPreset(presetId: string) {
-    const preset = RESOLUTION_PRESETS.find((p) => p.id === presetId)
+    const preset = RESOLUTION_PRESETS.find((item) => item.id === presetId)
     if (!preset) return
     output.presetId = preset.id
     output.width = preset.width
     output.height = preset.height
   }
 
-  function jumpToSlide(index: number) {
-    const item = timeline.value.slides[index]
-    if (!item) return
-    // Jump slightly past transitionIn so the slide is clearly visible when scrubbing
-    currentTime.value = item.startTime + Math.min(item.transitionInDuration, item.duration * 0.4)
+  function jumpToSlide(slideIndex: number) {
+    const timelineSlide = timeline.value.slides[slideIndex]
+    if (!timelineSlide) return
+    // Seek just past the incoming transition so the selected slide is immediately visible
+    const postTransitionOffset = Math.min(
+      timelineSlide.transitionInDuration,
+      timelineSlide.duration * 0.4,
+    )
+    currentTime.value = timelineSlide.startTime + postTransitionOffset
   }
 
   return {

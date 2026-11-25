@@ -21,8 +21,12 @@ import type {
 import { BitmapCache } from '../engine/imageCache'
 import { SlideshowRenderer } from '../engine/renderer'
 import { PreviewAudioPlayer } from '../engine/audioEngine'
-import { formatTime } from '../engine/timeline'
+import { findSlideIndexAtTime } from '../engine/timeline'
+import { formatTime } from '../utils/formatters'
 import { extractImagesFromDrop } from '../utils/fileDrop'
+
+const PREVIEW_MAX_RENDER_DIMENSION_PX = 960
+const PREVIEW_LOOKAHEAD_SLIDE_COUNT = 3
 
 const props = defineProps<{
   slides: SlideImage[]
@@ -37,9 +41,9 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  (e: 'update:currentTime', val: number): void
-  (e: 'update:isPlaying', val: boolean): void
-  (e: 'update:isMuted', val: boolean): void
+  (e: 'update:currentTime', timeSeconds: number): void
+  (e: 'update:isPlaying', playing: boolean): void
+  (e: 'update:isMuted', muted: boolean): void
   (e: 'addFiles', files: File[]): void
 }>()
 
@@ -52,17 +56,22 @@ const renderer = new SlideshowRenderer()
 const bitmapCache = new BitmapCache(12, 1280)
 const audioPlayer = new PreviewAudioPlayer()
 
-let rafId: number | null = null
-let lastFrameWallTime = 0
-let localTime = 0
+let animationFrameId: number | null = null
+let previousFrameWallTimeMs = 0
+let playbackClockSeconds = 0
 
-// Preview internal render dimensions (scaled to <= 960px max side for silky 60fps preview)
-const previewDimensions = computed(() => {
-  const maxSide = 960
-  const scale = Math.min(1, maxSide / Math.max(props.output.width, props.output.height))
+/**
+ * Scales the preview canvas internal resolution to at most 960px on its longest side
+ * so live preview maintains a smooth 60fps even when output is set to 4K UHD.
+ */
+const previewCanvasDimensions = computed(() => {
+  const downscaleFactor = Math.min(
+    1,
+    PREVIEW_MAX_RENDER_DIMENSION_PX / Math.max(props.output.width, props.output.height),
+  )
   return {
-    width: Math.max(2, Math.round((props.output.width * scale) / 2) * 2),
-    height: Math.max(2, Math.round((props.output.height * scale) / 2) * 2),
+    width: Math.max(2, Math.round((props.output.width * downscaleFactor) / 2) * 2),
+    height: Math.max(2, Math.round((props.output.height * downscaleFactor) / 2) * 2),
   }
 })
 
@@ -70,19 +79,21 @@ const aspectRatioStyle = computed(() => ({
   aspectRatio: `${props.output.width} / ${props.output.height}`,
 }))
 
-const progressPercent = computed(() => {
+const timelineProgressPercent = computed(() => {
   if (props.timeline.totalDuration <= 0) return 0
   return Math.min(100, Math.max(0, (props.currentTime / props.timeline.totalDuration) * 100))
 })
 
-async function ensureBitmapsAndDraw(time: number) {
+async function renderFrameAtTime(timeSeconds: number) {
   const canvas = canvasRef.value
   if (!canvas) return
-  const { width, height } = previewDimensions.value
+
+  const { width, height } = previewCanvasDimensions.value
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width
     canvas.height = height
   }
+
   const ctx = canvas.getContext('2d', { alpha: false })
   if (!ctx) return
 
@@ -92,77 +103,61 @@ async function ensureBitmapsAndDraw(time: number) {
     return
   }
 
-  const idx = renderer.findSlideAtTime(props.timeline, time)
-  if (idx >= 0) {
-    const currSlide = props.slides[props.timeline.slides[idx].slideIndex]
-    const prevSlide = idx > 0 ? props.slides[props.timeline.slides[idx - 1].slideIndex] : null
-
-    const missing: Promise<unknown>[] = []
-    if (currSlide && !bitmapCache.getSync(currSlide.id)) {
-      missing.push(bitmapCache.get(currSlide))
-    }
-    if (prevSlide && !bitmapCache.getSync(prevSlide.id)) {
-      missing.push(bitmapCache.get(prevSlide))
-    }
-
-    // Preload next 3 slides in background
-    const preloadList: SlideImage[] = []
-    for (let k = 1; k <= 3; k++) {
-      if (idx + k < props.timeline.slides.length) {
-        preloadList.push(props.slides[props.timeline.slides[idx + k].slideIndex])
-      }
-    }
-    if (preloadList.length > 0) bitmapCache.preload(preloadList)
-
-    if (missing.length > 0 && !props.isPlaying) {
-      await Promise.all(missing)
-    }
-  }
+  const activeTimelineIndex = findSlideIndexAtTime(props.timeline, timeSeconds)
+  await bitmapCache.ensureSlideWindowLoaded(props.slides, props.timeline, activeTimelineIndex, {
+    lookaheadCount: PREVIEW_LOOKAHEAD_SLIDE_COUNT,
+    awaitActiveBitmaps: !props.isPlaying,
+  })
 
   renderer.renderFrame(
     ctx,
     width,
     height,
-    time,
+    timeSeconds,
     props.timeline,
     props.slides,
-    (id) => bitmapCache.getSync(id),
+    (slideId) => bitmapCache.getSync(slideId),
     props.effects,
   )
 }
 
-function tick(now: number) {
+function animationFrameLoop(currentWallTimeMs: number) {
   if (!props.isPlaying) return
-  const dt = Math.min(0.1, (now - lastFrameWallTime) / 1000)
-  lastFrameWallTime = now
-  localTime += dt
 
-  if (localTime >= props.timeline.totalDuration) {
-    localTime = props.timeline.totalDuration
-    emit('update:currentTime', localTime)
+  // Clamp frame delta to 100ms so background tab throttling does not cause large time jumps
+  const deltaSeconds = Math.min(0.1, (currentWallTimeMs - previousFrameWallTimeMs) / 1000)
+  previousFrameWallTimeMs = currentWallTimeMs
+  playbackClockSeconds += deltaSeconds
+
+  if (playbackClockSeconds >= props.timeline.totalDuration) {
+    playbackClockSeconds = props.timeline.totalDuration
+    emit('update:currentTime', playbackClockSeconds)
     emit('update:isPlaying', false)
-    void ensureBitmapsAndDraw(localTime)
+    void renderFrameAtTime(playbackClockSeconds)
     return
   }
 
-  emit('update:currentTime', localTime)
-  void ensureBitmapsAndDraw(localTime)
-  rafId = requestAnimationFrame(tick)
+  emit('update:currentTime', playbackClockSeconds)
+  void renderFrameAtTime(playbackClockSeconds)
+  animationFrameId = requestAnimationFrame(animationFrameLoop)
 }
 
 function startPlayback() {
   if (props.slides.length === 0 || props.timeline.totalDuration <= 0) return
-  localTime = props.currentTime >= props.timeline.totalDuration - 0.05 ? 0 : props.currentTime
-  if (localTime === 0) emit('update:currentTime', 0)
-  lastFrameWallTime = performance.now()
-  audioPlayer.start(props.music, localTime, props.timeline.totalDuration, props.isMuted)
-  rafId = requestAnimationFrame(tick)
+
+  const isAtEndOfTimeline = props.currentTime >= props.timeline.totalDuration - 0.05
+  playbackClockSeconds = isAtEndOfTimeline ? 0 : props.currentTime
+  if (playbackClockSeconds === 0) emit('update:currentTime', 0)
+
+  previousFrameWallTimeMs = performance.now()
+  audioPlayer.start(props.music, playbackClockSeconds, props.timeline.totalDuration, props.isMuted)
+  animationFrameId = requestAnimationFrame(animationFrameLoop)
 }
 
 function stopPlayback() {
-  if (rafId !== null) {
-    cancelAnimationFrame(rafId)
-    rafId = null
+  if (animationFrameId !== null) {
+    cancelAnimationFrame(animationFrameId)
+    animationFrameId = null
   }
   audioPlayer.stop()
 }
@@ -172,31 +167,36 @@ function togglePlay() {
   emit('update:isPlaying', !props.isPlaying)
 }
 
-function stepSlide(delta: number) {
+function stepToAdjacentSlide(indexDelta: number) {
   if (props.timeline.slides.length === 0) return
-  const targetIdx = Math.max(
+  const targetIndex = Math.max(
     0,
-    Math.min(props.timeline.slides.length - 1, props.activeSlideIndex + delta),
+    Math.min(props.timeline.slides.length - 1, props.activeSlideIndex + indexDelta),
   )
-  const slide = props.timeline.slides[targetIdx]
-  if (!slide) return
-  const t = slide.startTime + Math.min(slide.transitionInDuration, slide.duration * 0.35)
-  seekTo(t)
+  const targetSlide = props.timeline.slides[targetIndex]
+  if (!targetSlide) return
+
+  const postTransitionOffset = Math.min(
+    targetSlide.transitionInDuration,
+    targetSlide.duration * 0.35,
+  )
+  seekToTime(targetSlide.startTime + postTransitionOffset)
 }
 
-function seekTo(t: number) {
-  const clamped = Math.max(0, Math.min(props.timeline.totalDuration, t))
-  localTime = clamped
-  emit('update:currentTime', clamped)
+function seekToTime(targetTimeSeconds: number) {
+  const clampedTimeSeconds = Math.max(0, Math.min(props.timeline.totalDuration, targetTimeSeconds))
+  playbackClockSeconds = clampedTimeSeconds
+  emit('update:currentTime', clampedTimeSeconds)
+
   if (props.isPlaying) {
-    audioPlayer.start(props.music, clamped, props.timeline.totalDuration, props.isMuted)
+    audioPlayer.start(props.music, clampedTimeSeconds, props.timeline.totalDuration, props.isMuted)
   }
-  void ensureBitmapsAndDraw(clamped)
+  void renderFrameAtTime(clampedTimeSeconds)
 }
 
-function onScrubInput(e: Event) {
-  const val = Number((e.target as HTMLInputElement).value)
-  seekTo(val)
+function onScrubberInput(event: Event) {
+  const targetTimeSeconds = Number((event.target as HTMLInputElement).value)
+  seekToTime(targetTimeSeconds)
 }
 
 watch(
@@ -214,7 +214,6 @@ watch(
   },
 )
 
-// Restart audio sync if music config changes while playing
 watch(
   () => [
     props.music.audioBuffer,
@@ -225,12 +224,16 @@ watch(
   ],
   () => {
     if (props.isPlaying) {
-      audioPlayer.start(props.music, localTime, props.timeline.totalDuration, props.isMuted)
+      audioPlayer.start(
+        props.music,
+        playbackClockSeconds,
+        props.timeline.totalDuration,
+        props.isMuted,
+      )
     }
   },
 )
 
-// Re-render current frame whenever settings, slides, timeline, or scrubbed time changes
 watch(
   () => [
     props.currentTime,
@@ -242,34 +245,34 @@ watch(
   ],
   () => {
     if (!props.isPlaying) {
-      localTime = props.currentTime
-      void ensureBitmapsAndDraw(props.currentTime)
+      playbackClockSeconds = props.currentTime
+      void renderFrameAtTime(props.currentTime)
     }
   },
   { deep: true },
 )
 
-async function onDrop(e: DragEvent) {
-  e.preventDefault()
+async function onDrop(event: DragEvent) {
+  event.preventDefault()
   isDraggingOver.value = false
-  if (!e.dataTransfer) return
-  const files = await extractImagesFromDrop(e.dataTransfer)
-  if (files.length > 0) emit('addFiles', files)
+  if (!event.dataTransfer) return
+  const droppedFiles = await extractImagesFromDrop(event.dataTransfer)
+  if (droppedFiles.length > 0) emit('addFiles', droppedFiles)
 }
 
-function onDragOver(e: DragEvent) {
-  e.preventDefault()
+function onDragOver(event: DragEvent) {
+  event.preventDefault()
   isDraggingOver.value = true
 }
 
-function onDragLeave(e: DragEvent) {
-  if (e.currentTarget === e.target) {
+function onDragLeave(event: DragEvent) {
+  if (event.currentTarget === event.target) {
     isDraggingOver.value = false
   }
 }
 
-function onFileChange(e: Event) {
-  const input = e.target as HTMLInputElement
+function onFileChange(event: Event) {
+  const input = event.target as HTMLInputElement
   if (input.files && input.files.length > 0) {
     emit('addFiles', Array.from(input.files))
     input.value = ''
@@ -285,7 +288,7 @@ function openFolderPicker() {
 }
 
 onMounted(() => {
-  void ensureBitmapsAndDraw(props.currentTime)
+  void renderFrameAtTime(props.currentTime)
 })
 
 onBeforeUnmount(() => {
@@ -303,7 +306,7 @@ defineExpose({ openFilePicker })
     @dragleave="onDragLeave"
     @drop="onDrop"
   >
-    <!-- Hidden Inputs -->
+    <!-- Hidden File Inputs -->
     <input
       ref="fileInputRef"
       type="file"
@@ -369,7 +372,7 @@ defineExpose({ openFilePicker })
     </div>
 
     <!-- Preview Stage (When Photos Are Loaded) -->
-    <div v-else class="flex h-full w-full flex-col items-center justify-between gap-3 min-h-0">
+    <div v-else class="flex h-full min-h-0 w-full flex-col items-center justify-between gap-3">
       <!-- Canvas Container -->
       <div class="relative flex min-h-0 w-full flex-1 items-center justify-center">
         <div
@@ -379,7 +382,7 @@ defineExpose({ openFilePicker })
         >
           <canvas
             ref="canvasRef"
-            class="h-full w-full object-contain block cursor-pointer"
+            class="block h-full w-full cursor-pointer object-contain"
             @click="togglePlay"
           />
 
@@ -407,7 +410,7 @@ defineExpose({ openFilePicker })
             <div class="h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
               <div
                 class="h-full rounded-full bg-indigo-500 transition-[width] duration-75"
-                :style="{ width: `${progressPercent}%` }"
+                :style="{ width: `${timelineProgressPercent}%` }"
               />
             </div>
             <input
@@ -418,7 +421,7 @@ defineExpose({ openFilePicker })
               :value="props.currentTime"
               class="absolute inset-0 h-full w-full cursor-pointer opacity-0"
               aria-label="Seek timeline"
-              @input="onScrubInput"
+              @input="onScrubberInput"
             />
           </div>
           <span class="w-11 shrink-0 text-right font-mono text-[11px] text-zinc-400">
@@ -438,7 +441,10 @@ defineExpose({ openFilePicker })
               <VolumeX v-if="props.isMuted || !props.music.audioBuffer" class="h-4 w-4" />
               <Volume2 v-else class="h-4 w-4 text-indigo-400" />
             </button>
-            <span v-if="props.music.audioBuffer" class="max-w-[180px] truncate text-[11px] text-zinc-400">
+            <span
+              v-if="props.music.audioBuffer"
+              class="max-w-[180px] truncate text-[11px] text-zinc-400"
+            >
               {{ props.music.name }}
             </span>
             <span v-else class="text-[11px] text-zinc-500">No audio</span>
@@ -449,7 +455,7 @@ defineExpose({ openFilePicker })
               type="button"
               class="rounded-lg p-1.5 text-zinc-300 transition hover:bg-zinc-800 hover:text-white"
               title="Previous slide (Left Arrow)"
-              @click="stepSlide(-1)"
+              @click="stepToAdjacentSlide(-1)"
             >
               <SkipBack class="h-4 w-4" />
             </button>
@@ -466,7 +472,7 @@ defineExpose({ openFilePicker })
               type="button"
               class="rounded-lg p-1.5 text-zinc-300 transition hover:bg-zinc-800 hover:text-white"
               title="Next slide (Right Arrow)"
-              @click="stepSlide(1)"
+              @click="stepToAdjacentSlide(1)"
             >
               <SkipForward class="h-4 w-4" />
             </button>

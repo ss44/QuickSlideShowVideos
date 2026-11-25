@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { Download, X, CheckCircle2, AlertCircle, Loader2 } from 'lucide-vue-next'
 import type { ExportProgress, OutputConfig } from '../types/slideshow'
-import { formatTime } from '../engine/timeline'
+import { formatBytesToMB, formatTime } from '../utils/formatters'
 
 const props = defineProps<{
   open: boolean
@@ -18,21 +18,22 @@ const emit = defineEmits<{
   (e: 'downloadAgain'): void
 }>()
 
-const isRunning = computed(() => {
-  const p = props.progress?.phase
-  return p === 'preparing' || p === 'audio' || p === 'rendering' || p === 'finalizing'
+const isEncodingInProgress = computed(() => {
+  const phase = props.progress?.phase
+  return (
+    phase === 'preparing' ||
+    phase === 'audio' ||
+    phase === 'rendering' ||
+    phase === 'finalizing'
+  )
 })
 
-const fileSizeText = computed(() => {
-  const bytes = props.progress?.fileSizeBytes
-  if (!bytes) return ''
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-})
+const formattedFileSize = computed(() => formatBytesToMB(props.progress?.fileSizeBytes))
 
-const etaText = computed(() => {
-  const ms = props.progress?.estimatedRemainingMs
-  if (ms === null || ms === undefined) return 'Calculating…'
-  return `~${formatTime(Math.ceil(ms / 1000))} remaining`
+const estimatedRemainingText = computed(() => {
+  const remainingMs = props.progress?.estimatedRemainingMs
+  if (remainingMs === null || remainingMs === undefined) return 'Calculating…'
+  return `~${formatTime(Math.ceil(remainingMs / 1000))} remaining`
 })
 </script>
 
@@ -59,7 +60,7 @@ const etaText = computed(() => {
             </p>
           </div>
           <button
-            v-if="!isRunning"
+            v-if="!isEncodingInProgress"
             type="button"
             class="rounded-lg p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
             @click="emit('close')"
@@ -69,7 +70,7 @@ const etaText = computed(() => {
         </div>
 
         <!-- Active Progress -->
-        <div v-if="isRunning" class="mt-6 space-y-3">
+        <div v-if="isEncodingInProgress" class="mt-6 space-y-3">
           <div class="flex items-center justify-between text-xs">
             <span class="flex items-center gap-2 text-zinc-300">
               <Loader2 class="h-3.5 w-3.5 animate-spin text-indigo-400" />
@@ -87,7 +88,7 @@ const etaText = computed(() => {
 
           <div class="flex items-center justify-between text-[11px] text-zinc-500">
             <span>Elapsed: {{ formatTime(Math.floor(props.progress.elapsedMs / 1000)) }}</span>
-            <span>{{ etaText }}</span>
+            <span>{{ estimatedRemainingText }}</span>
           </div>
 
           <p class="rounded-lg bg-zinc-900/80 p-2.5 text-[11px] text-zinc-400">
@@ -114,7 +115,7 @@ const etaText = computed(() => {
             <div class="min-w-0 text-xs">
               <div class="truncate font-semibold text-emerald-200">{{ props.progress.fileName }}</div>
               <div class="mt-0.5 text-emerald-300/80">
-                {{ fileSizeText }} · Rendered in
+                {{ formattedFileSize }} · Rendered in
                 {{ formatTime(Math.max(1, Math.round(props.progress.elapsedMs / 1000))) }}
               </div>
             </div>

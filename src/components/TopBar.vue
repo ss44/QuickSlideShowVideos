@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Film, Download, Clock, HardDrive, Images } from 'lucide-vue-next'
-import { formatTime } from '../engine/timeline'
+import { formatEstimatedSizeMB, formatTime } from '../utils/formatters'
 import type { OutputConfig } from '../types/slideshow'
 
 const props = defineProps<{
@@ -62,7 +62,7 @@ const emit = defineEmits<{
       <div class="flex items-center gap-1.5" title="Estimated output file size">
         <HardDrive class="h-3.5 w-3.5 text-zinc-400" />
         <span class="font-mono text-zinc-200">
-          ~{{ props.estimatedSizeMB < 1 ? props.estimatedSizeMB.toFixed(1) : Math.round(props.estimatedSizeMB) }} MB
+          ~{{ formatEstimatedSizeMB(props.estimatedSizeMB) }}
         </span>
         <span class="text-zinc-500">
           · {{ props.output.width }}×{{ props.output.height }} {{ props.output.fps }}fps

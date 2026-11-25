@@ -38,128 +38,126 @@ const {
   jumpToSlide,
 } = useSlideshow()
 
-const previewRef = ref<InstanceType<typeof PreviewStage> | null>(null)
-const exportModalOpen = ref(false)
+const previewStageRef = ref<InstanceType<typeof PreviewStage> | null>(null)
+const isExportModalOpen = ref(false)
 const exportProgress = ref<ExportProgress | null>(null)
-let abortController: AbortController | null = null
+let activeExportAbortController: AbortController | null = null
 
-function triggerDownload(url: string, fileName: string) {
-  const a = document.createElement('a')
-  a.href = url
-  a.download = fileName
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
+function triggerBrowserDownload(blobUrl: string, fileName: string) {
+  const downloadAnchor = document.createElement('a')
+  downloadAnchor.href = blobUrl
+  downloadAnchor.download = fileName
+  document.body.appendChild(downloadAnchor)
+  downloadAnchor.click()
+  document.body.removeChild(downloadAnchor)
+}
+
+function revokePreviousExportBlobUrl() {
+  if (exportProgress.value?.blobUrl) {
+    URL.revokeObjectURL(exportProgress.value.blobUrl)
+  }
+}
+
+function isEditableFormElement(target: EventTarget | null): boolean {
+  const tagName = (target as HTMLElement | null)?.tagName
+  return tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT'
 }
 
 async function startExport() {
   if (slides.value.length === 0) return
 
-  // Pause preview during export
+  // Pause live preview playback before starting offline WebCodecs render
   isPlaying.value = false
+  revokePreviousExportBlobUrl()
 
-  if (exportProgress.value?.blobUrl) {
-    URL.revokeObjectURL(exportProgress.value.blobUrl)
-  }
-
-  abortController = new AbortController()
-  exportModalOpen.value = true
-  const startMs = performance.now()
+  activeExportAbortController = new AbortController()
+  isExportModalOpen.value = true
+  const exportStartTimeMs = performance.now()
 
   try {
-    const result = await exportSlideshowVideo({
+    const exportResult = await exportSlideshowVideo({
       slides: slides.value,
       timeline: timeline.value,
       effects: { ...effects },
       music: { ...music },
       output: { ...output },
-      signal: abortController.signal,
-      onProgress: (p) => {
-        exportProgress.value = p
+      signal: activeExportAbortController.signal,
+      onProgress: (progressUpdate) => {
+        exportProgress.value = progressUpdate
       },
     })
 
-    const blobUrl = URL.createObjectURL(result.blob)
+    const blobUrl = URL.createObjectURL(exportResult.blob)
     exportProgress.value = {
       phase: 'done',
       currentFrame: exportProgress.value?.totalFrames ?? 0,
       totalFrames: exportProgress.value?.totalFrames ?? 0,
       percent: 100,
-      elapsedMs: performance.now() - startMs,
+      elapsedMs: performance.now() - exportStartTimeMs,
       estimatedRemainingMs: 0,
       message: 'Export complete!',
       blobUrl,
-      fileName: result.fileName,
-      fileSizeBytes: result.blob.size,
+      fileName: exportResult.fileName,
+      fileSizeBytes: exportResult.blob.size,
     }
-    triggerDownload(blobUrl, result.fileName)
+    triggerBrowserDownload(blobUrl, exportResult.fileName)
   } catch (err) {
-    if (err instanceof DOMException && err.name === 'AbortError') {
-      exportProgress.value = {
-        phase: 'cancelled',
-        currentFrame: 0,
-        totalFrames: 0,
-        percent: 0,
-        elapsedMs: performance.now() - startMs,
-        estimatedRemainingMs: null,
-        message: 'Export was cancelled.',
-      }
-    } else {
-      exportProgress.value = {
-        phase: 'error',
-        currentFrame: 0,
-        totalFrames: 0,
-        percent: 0,
-        elapsedMs: performance.now() - startMs,
-        estimatedRemainingMs: null,
-        message: err instanceof Error ? err.message : 'An unexpected error occurred during export.',
-      }
+    const isCancelled = err instanceof DOMException && err.name === 'AbortError'
+    exportProgress.value = {
+      phase: isCancelled ? 'cancelled' : 'error',
+      currentFrame: 0,
+      totalFrames: 0,
+      percent: 0,
+      elapsedMs: performance.now() - exportStartTimeMs,
+      estimatedRemainingMs: null,
+      message: isCancelled
+        ? 'Export was cancelled.'
+        : err instanceof Error
+          ? err.message
+          : 'An unexpected error occurred during export.',
     }
   } finally {
-    abortController = null
+    activeExportAbortController = null
   }
 }
 
 function cancelExport() {
-  abortController?.abort()
+  activeExportAbortController?.abort()
 }
 
 function closeExportModal() {
-  exportModalOpen.value = false
+  isExportModalOpen.value = false
 }
 
-function downloadAgain() {
+function downloadExportAgain() {
   if (exportProgress.value?.blobUrl && exportProgress.value?.fileName) {
-    triggerDownload(exportProgress.value.blobUrl, exportProgress.value.fileName)
+    triggerBrowserDownload(exportProgress.value.blobUrl, exportProgress.value.fileName)
   }
 }
 
-function onKeyDown(e: KeyboardEvent) {
-  const tag = (e.target as HTMLElement | null)?.tagName
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
-  if (exportModalOpen.value) return
+function onGlobalKeyDown(event: KeyboardEvent) {
+  if (isEditableFormElement(event.target) || isExportModalOpen.value) return
+  if (slides.value.length === 0) return
 
-  if (e.code === 'Space' && slides.value.length > 0) {
-    e.preventDefault()
+  if (event.code === 'Space') {
+    event.preventDefault()
     isPlaying.value = !isPlaying.value
-  } else if (e.code === 'ArrowRight' && slides.value.length > 0) {
-    e.preventDefault()
+  } else if (event.code === 'ArrowRight') {
+    event.preventDefault()
     jumpToSlide(Math.min(slides.value.length - 1, activeSlideIndex.value + 1))
-  } else if (e.code === 'ArrowLeft' && slides.value.length > 0) {
-    e.preventDefault()
+  } else if (event.code === 'ArrowLeft') {
+    event.preventDefault()
     jumpToSlide(Math.max(0, activeSlideIndex.value - 1))
   }
 }
 
 onMounted(() => {
-  window.addEventListener('keydown', onKeyDown)
+  window.addEventListener('keydown', onGlobalKeyDown)
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('keydown', onKeyDown)
-  if (exportProgress.value?.blobUrl) {
-    URL.revokeObjectURL(exportProgress.value.blobUrl)
-  }
+  window.removeEventListener('keydown', onGlobalKeyDown)
+  revokePreviousExportBlobUrl()
 })
 </script>
 
@@ -179,7 +177,7 @@ onBeforeUnmount(() => {
       <!-- Left/Center Workspace: Preview + Filmstrip -->
       <main class="flex min-h-0 min-w-0 flex-1 flex-col">
         <PreviewStage
-          ref="previewRef"
+          ref="previewStageRef"
           :slides="slides"
           :timeline="timeline"
           :effects="effects"
@@ -198,7 +196,7 @@ onBeforeUnmount(() => {
         <Filmstrip
           :slides="slides"
           :active-slide-index="activeSlideIndex"
-          @add-more="previewRef?.openFilePicker()"
+          @add-more="previewStageRef?.openFilePicker()"
           @jump-to="jumpToSlide"
           @remove="removeSlide"
           @rotate="rotateSlide"
@@ -229,14 +227,14 @@ onBeforeUnmount(() => {
     </div>
 
     <ExportModal
-      :open="exportModalOpen"
+      :open="isExportModalOpen"
       :progress="exportProgress"
       :output="output"
       :slide-count="slides.length"
       :total-duration="timeline.totalDuration"
       @cancel="cancelExport"
       @close="closeExportModal"
-      @download-again="downloadAgain"
+      @download-again="downloadExportAgain"
     />
   </div>
 </template>
