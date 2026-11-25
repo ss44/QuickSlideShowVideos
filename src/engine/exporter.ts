@@ -5,6 +5,7 @@ import type {
   ExportProgress,
   MusicConfig,
   OutputConfig,
+  OutputFormat,
   SlideImage,
   SmartEffectsConfig,
 } from '../types/slideshow'
@@ -13,34 +14,70 @@ import { SlideshowRenderer } from './renderer'
 import { getVideoBitrate } from './timeline'
 import { renderExportAudioBuffer } from './audioEngine'
 
+const EXPORT_AUDIO_SAMPLE_RATE_HZ = 48000
+const EXPORT_AUDIO_BITRATE_BPS = 160_000
+const AUDIO_CHUNK_FRAME_COUNT = 4096
+const MAX_AUDIO_ENCODE_QUEUE_SIZE = 16
+const MAX_VIDEO_ENCODE_QUEUE_SIZE = 12
+const PROGRESS_REPORT_INTERVAL_MS = 120
+
+interface VideoCodecSelection {
+  webCodecsCodec: string
+  muxerCodec: 'avc' | 'V_VP9' | 'V_VP8'
+}
+
+interface AudioCodecSelection {
+  webCodecsCodec: string
+  muxerCodec: 'aac' | 'opus' | 'A_OPUS'
+}
+
+/**
+ * Container-agnostic muxer abstraction (Dependency Inversion Principle).
+ * Decouples the WebCodecs audio/video encoding loops from container-specific (`Mp4Muxer` vs `WebmMuxer`) APIs.
+ */
+interface MediaContainerMuxer {
+  addVideoChunk(chunk: EncodedVideoChunk, meta?: EncodedVideoChunkMetadata): void
+  addAudioChunk(chunk: EncodedAudioChunk, meta?: EncodedAudioChunkMetadata): void
+  finalizeToBlob(): Blob
+}
+
 export function isWebCodecsSupported(): boolean {
   return typeof VideoEncoder !== 'undefined' && typeof VideoFrame !== 'undefined'
 }
 
-async function pickVideoCodec(
-  format: 'mp4' | 'webm',
+function yieldToMainThread(delayMs = 0): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs))
+}
+
+/**
+ * Probes `VideoEncoder.isConfigSupported()` to pick the highest-quality supported codec profile.
+ * Configured with `latencyMode: 'realtime'` to disable out-of-order B-frame reordering,
+ * which is required by `mp4-muxer` for monotonically increasing chunk timestamps.
+ */
+async function selectSupportedVideoCodec(
+  format: OutputFormat,
   width: number,
   height: number,
   fps: number,
   bitrate: number,
-): Promise<{ codec: string; muxerCodec: 'avc' | 'V_VP9' | 'V_VP8' }> {
-  const candidates: Array<{ codec: string; muxerCodec: 'avc' | 'V_VP9' | 'V_VP8' }> =
+): Promise<VideoCodecSelection> {
+  const candidates: VideoCodecSelection[] =
     format === 'mp4'
       ? [
-          { codec: 'avc1.640033', muxerCodec: 'avc' }, // High L5.1 (4K)
-          { codec: 'avc1.640028', muxerCodec: 'avc' }, // High L4.0 (1080p)
-          { codec: 'avc1.4d0028', muxerCodec: 'avc' }, // Main L4.0
-          { codec: 'avc1.42001f', muxerCodec: 'avc' }, // Baseline L3.1
+          { webCodecsCodec: 'avc1.640033', muxerCodec: 'avc' }, // H.264 High Profile L5.1 (4K)
+          { webCodecsCodec: 'avc1.640028', muxerCodec: 'avc' }, // H.264 High Profile L4.0 (1080p)
+          { webCodecsCodec: 'avc1.4d0028', muxerCodec: 'avc' }, // H.264 Main Profile L4.0
+          { webCodecsCodec: 'avc1.42001f', muxerCodec: 'avc' }, // H.264 Baseline Profile L3.1
         ]
       : [
-          { codec: 'vp09.00.10.08', muxerCodec: 'V_VP9' },
-          { codec: 'vp8', muxerCodec: 'V_VP8' },
+          { webCodecsCodec: 'vp09.00.10.08', muxerCodec: 'V_VP9' },
+          { webCodecsCodec: 'vp8', muxerCodec: 'V_VP8' },
         ]
 
-  for (const cand of candidates) {
+  for (const candidate of candidates) {
     try {
       const support = await VideoEncoder.isConfigSupported({
-        codec: cand.codec,
+        codec: candidate.webCodecsCodec,
         width,
         height,
         bitrate,
@@ -48,10 +85,10 @@ async function pickVideoCodec(
         latencyMode: 'realtime',
       })
       if (support.supported) {
-        return cand
+        return candidate
       }
     } catch {
-      // try next
+      // Probe next candidate profile
     }
   }
 
@@ -60,43 +97,396 @@ async function pickVideoCodec(
   )
 }
 
-async function pickAudioCodec(
-  format: 'mp4' | 'webm',
-  sampleRate: number,
-): Promise<{ codec: string; muxerCodec: 'aac' | 'opus' | 'A_OPUS' } | null> {
+/**
+ * Probes `AudioEncoder.isConfigSupported()`.
+ * For MP4, prefers AAC (`mp4a.40.2`) and gracefully falls back to Opus (`opus` in MP4 ISO BMFF)
+ * on platforms like Linux Chromium that ship without a proprietary AAC encoder.
+ */
+async function selectSupportedAudioCodec(
+  format: OutputFormat,
+  sampleRateHz: number,
+): Promise<AudioCodecSelection | null> {
   if (typeof AudioEncoder === 'undefined' || typeof AudioData === 'undefined') {
     return null
   }
-  // MP4 prefers AAC for widest player support, falling back to Opus (supported by mp4-muxer)
-  // when AAC AudioEncoder is unavailable (e.g. Linux Chromium).
-  const candidates: Array<{ codec: string; muxerCodec: 'aac' | 'opus' | 'A_OPUS' }> =
+
+  const candidates: AudioCodecSelection[] =
     format === 'mp4'
       ? [
-          { codec: 'mp4a.40.2', muxerCodec: 'aac' },
-          { codec: 'opus', muxerCodec: 'opus' },
+          { webCodecsCodec: 'mp4a.40.2', muxerCodec: 'aac' },
+          { webCodecsCodec: 'opus', muxerCodec: 'opus' },
         ]
-      : [{ codec: 'opus', muxerCodec: 'A_OPUS' }]
+      : [{ webCodecsCodec: 'opus', muxerCodec: 'A_OPUS' }]
 
-  for (const cand of candidates) {
+  for (const candidate of candidates) {
     try {
       const support = await AudioEncoder.isConfigSupported({
-        codec: cand.codec,
+        codec: candidate.webCodecsCodec,
         numberOfChannels: 2,
-        sampleRate,
-        bitrate: 160_000,
+        sampleRate: sampleRateHz,
+        bitrate: EXPORT_AUDIO_BITRATE_BPS,
       })
-      if (support.supported) return cand
+      if (support.supported) return candidate
     } catch {
-      // try next
+      // Probe next candidate
     }
   }
   return null
 }
 
-function yieldToMain(ms = 0): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+/**
+ * Factory creating a unified `MediaContainerMuxer` for either MP4 or WebM output.
+ */
+function createContainerMuxer(params: {
+  format: OutputFormat
+  width: number
+  height: number
+  fps: number
+  videoCodec: VideoCodecSelection
+  audioCodec: AudioCodecSelection | null
+  hasAudioTrack: boolean
+}): MediaContainerMuxer {
+  const { format, width, height, fps, videoCodec, audioCodec, hasAudioTrack } = params
+
+  if (format === 'mp4') {
+    const target = new Mp4Target()
+    const muxer = new Mp4Muxer({
+      target,
+      video: { codec: 'avc', width, height },
+      audio:
+        hasAudioTrack && audioCodec
+          ? {
+              codec: audioCodec.muxerCodec === 'opus' ? 'opus' : 'aac',
+              numberOfChannels: 2,
+              sampleRate: EXPORT_AUDIO_SAMPLE_RATE_HZ,
+            }
+          : undefined,
+      fastStart: 'in-memory',
+      firstTimestampBehavior: 'offset',
+    })
+
+    return {
+      addVideoChunk: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+      addAudioChunk: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
+      finalizeToBlob: () => {
+        muxer.finalize()
+        return new Blob([target.buffer], { type: 'video/mp4' })
+      },
+    }
+  }
+
+  const target = new WebmTarget()
+  const muxer = new WebmMuxer({
+    target,
+    video: {
+      codec: videoCodec.muxerCodec === 'V_VP8' ? 'V_VP8' : 'V_VP9',
+      width,
+      height,
+      frameRate: fps,
+    },
+    audio:
+      hasAudioTrack && audioCodec
+        ? {
+            codec: 'A_OPUS',
+            numberOfChannels: 2,
+            sampleRate: EXPORT_AUDIO_SAMPLE_RATE_HZ,
+          }
+        : undefined,
+    firstTimestampBehavior: 'offset',
+  })
+
+  return {
+    addVideoChunk: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+    addAudioChunk: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
+    finalizeToBlob: () => {
+      muxer.finalize()
+      return new Blob([target.buffer], { type: 'video/webm' })
+    },
+  }
 }
 
+/**
+ * Packs a slice of stereo `AudioBuffer` channels into WebCodecs `'f32-planar'` layout:
+ * all left-channel samples occupy `[0 .. frameCount - 1]`, followed contiguously by
+ * all right-channel samples in `[frameCount .. 2 * frameCount - 1]`.
+ */
+function packStereoChunkAsPlanarFloat32(
+  leftChannel: Float32Array,
+  rightChannel: Float32Array,
+  sampleOffset: number,
+  frameCount: number,
+): Float32Array {
+  const planarBuffer = new Float32Array(frameCount * 2)
+  planarBuffer.set(leftChannel.subarray(sampleOffset, sampleOffset + frameCount), 0)
+  planarBuffer.set(rightChannel.subarray(sampleOffset, sampleOffset + frameCount), frameCount)
+  return planarBuffer
+}
+
+/**
+ * Encodes a rendered stereo `AudioBuffer` into `containerMuxer` using WebCodecs `AudioEncoder`.
+ */
+async function encodeAudioTrackToMuxer(params: {
+  renderedAudio: AudioBuffer
+  audioCodec: AudioCodecSelection
+  containerMuxer: MediaContainerMuxer
+  signal: AbortSignal
+}): Promise<void> {
+  const { renderedAudio, audioCodec, containerMuxer, signal } = params
+  let encoderError: Error | null = null
+
+  const audioEncoder = new AudioEncoder({
+    output: (chunk, meta) => {
+      try {
+        containerMuxer.addAudioChunk(chunk, meta)
+      } catch (err) {
+        encoderError = err instanceof Error ? err : new Error(String(err))
+      }
+    },
+    error: (err) => {
+      encoderError = err instanceof Error ? err : new Error(String(err))
+    },
+  })
+
+  audioEncoder.configure({
+    codec: audioCodec.webCodecsCodec,
+    numberOfChannels: 2,
+    sampleRate: EXPORT_AUDIO_SAMPLE_RATE_HZ,
+    bitrate: EXPORT_AUDIO_BITRATE_BPS,
+  })
+
+  const leftChannel = renderedAudio.getChannelData(0)
+  const rightChannel =
+    renderedAudio.numberOfChannels > 1 ? renderedAudio.getChannelData(1) : leftChannel
+  const totalSamples = renderedAudio.length
+
+  try {
+    for (
+      let sampleOffset = 0;
+      sampleOffset < totalSamples;
+      sampleOffset += AUDIO_CHUNK_FRAME_COUNT
+    ) {
+      if (signal.aborted) {
+        throw new DOMException('Cancelled', 'AbortError')
+      }
+      if (encoderError) {
+        throw encoderError
+      }
+
+      const frameCount = Math.min(AUDIO_CHUNK_FRAME_COUNT, totalSamples - sampleOffset)
+      const planarData = packStereoChunkAsPlanarFloat32(
+        leftChannel,
+        rightChannel,
+        sampleOffset,
+        frameCount,
+      )
+      const timestampMicroseconds = Math.round(
+        (sampleOffset / EXPORT_AUDIO_SAMPLE_RATE_HZ) * 1_000_000,
+      )
+
+      const audioData = new AudioData({
+        format: 'f32-planar',
+        sampleRate: EXPORT_AUDIO_SAMPLE_RATE_HZ,
+        numberOfFrames: frameCount,
+        numberOfChannels: 2,
+        timestamp: timestampMicroseconds,
+        data: planarData,
+      })
+
+      audioEncoder.encode(audioData)
+      audioData.close()
+
+      while (
+        audioEncoder.encodeQueueSize > MAX_AUDIO_ENCODE_QUEUE_SIZE &&
+        !signal.aborted &&
+        !encoderError &&
+        audioEncoder.state === 'configured'
+      ) {
+        await yieldToMainThread(5)
+      }
+    }
+
+    await audioEncoder.flush()
+    if (encoderError) throw encoderError
+  } finally {
+    try {
+      if (audioEncoder.state !== 'closed') audioEncoder.close()
+    } catch {
+      // Ignore close errors on aborted encoder
+    }
+  }
+}
+
+/**
+ * Renders every frame onto an offscreen canvas via `SlideshowRenderer` and encodes into `containerMuxer`.
+ */
+async function encodeVideoFramesToMuxer(params: {
+  slides: SlideImage[]
+  timeline: ComputedTimeline
+  effects: SmartEffectsConfig
+  output: OutputConfig
+  width: number
+  height: number
+  totalFrames: number
+  bitrate: number
+  videoCodec: VideoCodecSelection
+  containerMuxer: MediaContainerMuxer
+  startTimeMs: number
+  signal: AbortSignal
+  onProgress: (progress: ExportProgress) => void
+}): Promise<void> {
+  const {
+    slides,
+    timeline,
+    effects,
+    output,
+    width,
+    height,
+    totalFrames,
+    bitrate,
+    videoCodec,
+    containerMuxer,
+    startTimeMs,
+    signal,
+    onProgress,
+  } = params
+
+  let encoderError: Error | null = null
+
+  const videoEncoder = new VideoEncoder({
+    output: (chunk, meta) => {
+      try {
+        containerMuxer.addVideoChunk(chunk, meta)
+      } catch (err) {
+        encoderError = err instanceof Error ? err : new Error(String(err))
+      }
+    },
+    error: (err) => {
+      encoderError = err instanceof Error ? err : new Error(String(err))
+    },
+  })
+
+  videoEncoder.configure({
+    codec: videoCodec.webCodecsCodec,
+    width,
+    height,
+    bitrate,
+    framerate: output.fps,
+    latencyMode: 'realtime',
+    avc: output.format === 'mp4' ? { format: 'avc' } : undefined,
+  })
+
+  const renderCanvas = document.createElement('canvas')
+  renderCanvas.width = width
+  renderCanvas.height = height
+  const renderCtx = renderCanvas.getContext('2d', { alpha: false })!
+  const renderer = new SlideshowRenderer()
+  const exportBitmapCache = new BitmapCache(6, Math.max(width, height))
+
+  const frameDurationMicroseconds = Math.round(1_000_000 / output.fps)
+  const keyFrameIntervalFrames = output.fps * 2 // Insert an IDR keyframe every 2 seconds
+
+  try {
+    let lastProgressReportTimeMs = 0
+
+    for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
+      if (signal.aborted) {
+        throw new DOMException('Cancelled', 'AbortError')
+      }
+      if (encoderError) {
+        throw encoderError
+      }
+
+      const frameTimeSeconds = frameIndex / output.fps
+      const activeTimelineIndex = renderer.findSlideAtTime(timeline, frameTimeSeconds)
+
+      await exportBitmapCache.ensureSlideWindowLoaded(slides, timeline, activeTimelineIndex, {
+        lookaheadCount: 2,
+        awaitActiveBitmaps: true,
+      })
+
+      renderer.renderFrame(
+        renderCtx,
+        width,
+        height,
+        frameTimeSeconds,
+        timeline,
+        slides,
+        (slideId) => exportBitmapCache.getSync(slideId),
+        effects,
+      )
+
+      const timestampMicroseconds = Math.round((frameIndex * 1_000_000) / output.fps)
+      const videoFrame = new VideoFrame(renderCanvas, {
+        timestamp: timestampMicroseconds,
+        duration: frameDurationMicroseconds,
+      })
+
+      const isKeyFrame = frameIndex % keyFrameIntervalFrames === 0
+      videoEncoder.encode(videoFrame, { keyFrame: isKeyFrame })
+      videoFrame.close()
+
+      // Enforce encoder queue backpressure so GPU/RAM usage remains flat on long exports
+      while (
+        videoEncoder.encodeQueueSize > MAX_VIDEO_ENCODE_QUEUE_SIZE &&
+        !signal.aborted &&
+        !encoderError &&
+        videoEncoder.state === 'configured'
+      ) {
+        await yieldToMainThread(8)
+      }
+
+      const nowMs = performance.now()
+      const shouldReportProgress =
+        nowMs - lastProgressReportTimeMs > PROGRESS_REPORT_INTERVAL_MS ||
+        frameIndex === totalFrames - 1
+
+      if (shouldReportProgress) {
+        lastProgressReportTimeMs = nowMs
+        const elapsedMs = nowMs - startTimeMs
+        const completedFraction = (frameIndex + 1) / totalFrames
+        const estimatedRemainingMs =
+          frameIndex > 5
+            ? Math.max(0, (elapsedMs / completedFraction) * (1 - completedFraction))
+            : null
+
+        onProgress({
+          phase: 'rendering',
+          currentFrame: frameIndex + 1,
+          totalFrames,
+          percent: Math.min(96, Math.round(4 + completedFraction * 92)),
+          elapsedMs,
+          estimatedRemainingMs,
+          message: `Encoding frame ${frameIndex + 1} of ${totalFrames}…`,
+        })
+        await yieldToMainThread(0)
+      }
+    }
+
+    onProgress({
+      phase: 'finalizing',
+      currentFrame: totalFrames,
+      totalFrames,
+      percent: 98,
+      elapsedMs: performance.now() - startTimeMs,
+      estimatedRemainingMs: 500,
+      message: `Finalizing ${output.format.toUpperCase()} file…`,
+    })
+
+    await videoEncoder.flush()
+    if (encoderError) throw encoderError
+  } finally {
+    exportBitmapCache.clear()
+    try {
+      if (videoEncoder.state !== 'closed') videoEncoder.close()
+    } catch {
+      // Ignore close errors on aborted encoder
+    }
+  }
+}
+
+/**
+ * Orchestrates full client-side slideshow export (audio mixing + WebCodecs encoding + MP4/WebM muxing).
+ */
 export async function exportSlideshowVideo(params: {
   slides: SlideImage[]
   timeline: ComputedTimeline
@@ -118,11 +508,10 @@ export async function exportSlideshowVideo(params: {
     throw new Error('Add at least one photo before exporting.')
   }
 
-  // Ensure even dimensions for H.264 / VP9
-  const width = output.width - (output.width % 2)
-  const height = output.height - (output.height % 2)
-  const fps = output.fps
-  const totalFrames = Math.max(1, Math.ceil(timeline.totalDuration * fps))
+  // H.264 and VP9 encoders require even pixel dimensions
+  const evenWidth = output.width - (output.width % 2)
+  const evenHeight = output.height - (output.height % 2)
+  const totalFrames = Math.max(1, Math.ceil(timeline.totalDuration * output.fps))
   const bitrate = getVideoBitrate(output)
   const startTimeMs = performance.now()
 
@@ -136,14 +525,20 @@ export async function exportSlideshowVideo(params: {
     message: 'Initializing video encoder…',
   })
 
-  const videoCodecInfo = await pickVideoCodec(output.format, width, height, fps, bitrate)
-  const sampleRate = 48000
-  const hasMusic = Boolean(music.audioBuffer)
-  const audioCodecInfo = hasMusic ? await pickAudioCodec(output.format, sampleRate) : null
+  const videoCodec = await selectSupportedVideoCodec(
+    output.format,
+    evenWidth,
+    evenHeight,
+    output.fps,
+    bitrate,
+  )
+  const hasMusicBuffer = Boolean(music.audioBuffer)
+  const audioCodec = hasMusicBuffer
+    ? await selectSupportedAudioCodec(output.format, EXPORT_AUDIO_SAMPLE_RATE_HZ)
+    : null
 
-  // Render offline audio first if music is attached
   let renderedAudio: AudioBuffer | null = null
-  if (hasMusic && audioCodecInfo) {
+  if (hasMusicBuffer && audioCodec) {
     onProgress({
       phase: 'audio',
       currentFrame: 0,
@@ -153,285 +548,56 @@ export async function exportSlideshowVideo(params: {
       estimatedRemainingMs: null,
       message: 'Mixing audio track…',
     })
-    renderedAudio = await renderExportAudioBuffer(music, timeline.totalDuration, sampleRate)
+    renderedAudio = await renderExportAudioBuffer(
+      music,
+      timeline.totalDuration,
+      EXPORT_AUDIO_SAMPLE_RATE_HZ,
+    )
   }
 
-  if (signal.aborted) throw new DOMException('Cancelled', 'AbortError')
+  if (signal.aborted) {
+    throw new DOMException('Cancelled', 'AbortError')
+  }
 
-  // Create muxer
-  const isMp4 = output.format === 'mp4'
-  const mp4Target = isMp4 ? new Mp4Target() : null
-  const webmTarget = !isMp4 ? new WebmTarget() : null
-
-  const mp4Muxer = isMp4
-    ? new Mp4Muxer({
-        target: mp4Target!,
-        video: {
-          codec: 'avc',
-          width,
-          height,
-        },
-        audio:
-          renderedAudio && audioCodecInfo
-            ? {
-                codec: audioCodecInfo.muxerCodec === 'opus' ? 'opus' : 'aac',
-                numberOfChannels: 2,
-                sampleRate,
-              }
-            : undefined,
-        fastStart: 'in-memory',
-        firstTimestampBehavior: 'offset',
-      })
-    : null
-
-  const webmMuxer = !isMp4
-    ? new WebmMuxer({
-        target: webmTarget!,
-        video: {
-          codec: videoCodecInfo.muxerCodec === 'V_VP8' ? 'V_VP8' : 'V_VP9',
-          width,
-          height,
-          frameRate: fps,
-        },
-        audio:
-          renderedAudio && audioCodecInfo
-            ? {
-                codec: 'A_OPUS',
-                numberOfChannels: 2,
-                sampleRate,
-              }
-            : undefined,
-        firstTimestampBehavior: 'offset',
-      })
-    : null
-
-  let encoderError: Error | null = null
-
-  const videoEncoder = new VideoEncoder({
-    output: (chunk, meta) => {
-      try {
-        if (mp4Muxer) mp4Muxer.addVideoChunk(chunk, meta)
-        if (webmMuxer) webmMuxer.addVideoChunk(chunk, meta)
-      } catch (err) {
-        encoderError = err instanceof Error ? err : new Error(String(err))
-      }
-    },
-    error: (err) => {
-      encoderError = err instanceof Error ? err : new Error(String(err))
-    },
+  const containerMuxer = createContainerMuxer({
+    format: output.format,
+    width: evenWidth,
+    height: evenHeight,
+    fps: output.fps,
+    videoCodec,
+    audioCodec,
+    hasAudioTrack: Boolean(renderedAudio && audioCodec),
   })
 
-  videoEncoder.configure({
-    codec: videoCodecInfo.codec,
-    width,
-    height,
+  if (renderedAudio && audioCodec) {
+    await encodeAudioTrackToMuxer({
+      renderedAudio,
+      audioCodec,
+      containerMuxer,
+      signal,
+    })
+  }
+
+  await encodeVideoFramesToMuxer({
+    slides,
+    timeline,
+    effects,
+    output,
+    width: evenWidth,
+    height: evenHeight,
+    totalFrames,
     bitrate,
-    framerate: fps,
-    latencyMode: 'realtime',
-    avc: isMp4 ? { format: 'avc' } : undefined,
+    videoCodec,
+    containerMuxer,
+    startTimeMs,
+    signal,
+    onProgress,
   })
 
-  // Encode audio track if present
-  let audioEncoder: AudioEncoder | null = null
-  if (renderedAudio && audioCodecInfo) {
-    audioEncoder = new AudioEncoder({
-      output: (chunk, meta) => {
-        try {
-          if (mp4Muxer) mp4Muxer.addAudioChunk(chunk, meta)
-          if (webmMuxer) webmMuxer.addAudioChunk(chunk, meta)
-        } catch (err) {
-          encoderError = err instanceof Error ? err : new Error(String(err))
-        }
-      },
-      error: (err) => {
-        encoderError = err instanceof Error ? err : new Error(String(err))
-      },
-    })
-
-    audioEncoder.configure({
-      codec: audioCodecInfo.codec,
-      numberOfChannels: 2,
-      sampleRate,
-      bitrate: 160_000,
-    })
-
-    const left = renderedAudio.getChannelData(0)
-    const right = renderedAudio.numberOfChannels > 1 ? renderedAudio.getChannelData(1) : left
-    const chunkSamples = 4096
-    const totalSamples = renderedAudio.length
-
-    for (let offset = 0; offset < totalSamples; offset += chunkSamples) {
-      if (signal.aborted) {
-        audioEncoder.close()
-        videoEncoder.close()
-        throw new DOMException('Cancelled', 'AbortError')
-      }
-      if (encoderError) throw encoderError
-
-      const count = Math.min(chunkSamples, totalSamples - offset)
-      // Planar float32 layout: all channel 0 samples followed by all channel 1 samples
-      const planar = new Float32Array(count * 2)
-      planar.set(left.subarray(offset, offset + count), 0)
-      planar.set(right.subarray(offset, offset + count), count)
-
-      const audioData = new AudioData({
-        format: 'f32-planar',
-        sampleRate,
-        numberOfFrames: count,
-        numberOfChannels: 2,
-        timestamp: Math.round((offset / sampleRate) * 1_000_000),
-        data: planar,
-      })
-
-      audioEncoder.encode(audioData)
-      audioData.close()
-
-      while (
-        audioEncoder.encodeQueueSize > 16 &&
-        !signal.aborted &&
-        !encoderError &&
-        audioEncoder.state === 'configured'
-      ) {
-        await yieldToMain(5)
-      }
-    }
-
-    await audioEncoder.flush()
-    audioEncoder.close()
-  }
-
-  // Dedicated render canvas & sliding-window bitmap cache for export
-  const renderCanvas = document.createElement('canvas')
-  renderCanvas.width = width
-  renderCanvas.height = height
-  const renderCtx = renderCanvas.getContext('2d', { alpha: false })!
-  const renderer = new SlideshowRenderer()
-  const exportCache = new BitmapCache(6, Math.max(width, height))
-
-  const frameDurationUs = Math.round(1_000_000 / fps)
-  const keyFrameInterval = fps * 2 // keyframe every 2 seconds
-
-  try {
-    let lastReportTime = 0
-
-    for (let frameIdx = 0; frameIdx < totalFrames; frameIdx++) {
-      if (signal.aborted) {
-        throw new DOMException('Cancelled', 'AbortError')
-      }
-      if (encoderError) {
-        throw encoderError
-      }
-
-      const timeSec = frameIdx / fps
-      const activeIdx = renderer.findSlideAtTime(timeline, timeSec)
-
-      // Ensure current and previous slide bitmaps are decoded
-      if (activeIdx >= 0) {
-        const currSlide = slides[timeline.slides[activeIdx].slideIndex]
-        if (currSlide && !exportCache.getSync(currSlide.id)) {
-          await exportCache.get(currSlide)
-        }
-        if (activeIdx > 0) {
-          const prevSlide = slides[timeline.slides[activeIdx - 1].slideIndex]
-          if (prevSlide && !exportCache.getSync(prevSlide.id)) {
-            await exportCache.get(prevSlide)
-          }
-        }
-        // Preload next 2 slides asynchronously
-        const upcoming: SlideImage[] = []
-        for (let k = 1; k <= 2; k++) {
-          if (activeIdx + k < timeline.slides.length) {
-            upcoming.push(slides[timeline.slides[activeIdx + k].slideIndex])
-          }
-        }
-        if (upcoming.length > 0) exportCache.preload(upcoming)
-      }
-
-      renderer.renderFrame(
-        renderCtx,
-        width,
-        height,
-        timeSec,
-        timeline,
-        slides,
-        (id) => exportCache.getSync(id),
-        effects,
-      )
-
-      const timestampUs = Math.round((frameIdx * 1_000_000) / fps)
-      const videoFrame = new VideoFrame(renderCanvas, {
-        timestamp: timestampUs,
-        duration: frameDurationUs,
-      })
-
-      videoEncoder.encode(videoFrame, { keyFrame: frameIdx % keyFrameInterval === 0 })
-      videoFrame.close()
-
-      // Backpressure so browser memory never spikes
-      while (
-        videoEncoder.encodeQueueSize > 12 &&
-        !signal.aborted &&
-        !encoderError &&
-        videoEncoder.state === 'configured'
-      ) {
-        await yieldToMain(8)
-      }
-
-      const now = performance.now()
-      if (now - lastReportTime > 120 || frameIdx === totalFrames - 1) {
-        lastReportTime = now
-        const elapsedMs = now - startTimeMs
-        const doneFraction = (frameIdx + 1) / totalFrames
-        const estimatedRemainingMs =
-          frameIdx > 5 ? Math.max(0, (elapsedMs / doneFraction) * (1 - doneFraction)) : null
-
-        onProgress({
-          phase: 'rendering',
-          currentFrame: frameIdx + 1,
-          totalFrames,
-          percent: Math.min(96, Math.round(4 + doneFraction * 92)),
-          elapsedMs,
-          estimatedRemainingMs,
-          message: `Encoding frame ${frameIdx + 1} of ${totalFrames}…`,
-        })
-        await yieldToMain()
-      }
-    }
-
-    onProgress({
-      phase: 'finalizing',
-      currentFrame: totalFrames,
-      totalFrames,
-      percent: 98,
-      elapsedMs: performance.now() - startTimeMs,
-      estimatedRemainingMs: 500,
-      message: `Finalizing ${output.format.toUpperCase()} file…`,
-    })
-
-    await videoEncoder.flush()
-    videoEncoder.close()
-
-    if (mp4Muxer && mp4Target) {
-      mp4Muxer.finalize()
-      const blob = new Blob([mp4Target.buffer], { type: 'video/mp4' })
-      const timestamp = new Date().toISOString().slice(0, 16).replace(/[T:]/g, '-')
-      return { blob, fileName: `slideshow-${timestamp}.mp4` }
-    } else if (webmMuxer && webmTarget) {
-      webmMuxer.finalize()
-      const blob = new Blob([webmTarget.buffer], { type: 'video/webm' })
-      const timestamp = new Date().toISOString().slice(0, 16).replace(/[T:]/g, '-')
-      return { blob, fileName: `slideshow-${timestamp}.webm` }
-    }
-
-    throw new Error('Muxer initialization failed.')
-  } catch (err) {
-    try {
-      if (videoEncoder.state !== 'closed') videoEncoder.close()
-    } catch {
-      // ignore
-    }
-    throw err
-  } finally {
-    exportCache.clear()
+  const blob = containerMuxer.finalizeToBlob()
+  const timestampLabel = new Date().toISOString().slice(0, 16).replace(/[T:]/g, '-')
+  return {
+    blob,
+    fileName: `slideshow-${timestampLabel}.${output.format}`,
   }
 }

@@ -1,372 +1,583 @@
 import type {
   ColorLook,
   ComputedTimeline,
+  FitMode,
   SlideImage,
   SmartEffectsConfig,
   TimelineSlide,
   TransitionType,
 } from '../types/slideshow'
+import { findSlideIndexAtTime } from './timeline'
 
-function easeInOutCubic(t: number): number {
-  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
+const CANVAS_BACKGROUND_COLOR = '#09090b'
+const BLUR_SCRATCH_DIMENSION_PX = 96
+const ASPECT_MISMATCH_TOLERANCE = 0.04
+
+/**
+ * Cubic ease-in-out curve (`[0, 1] -> [0, 1]`) for smooth, natural transition acceleration and deceleration.
+ */
+function easeInOutCubic(linearProgress: number): number {
+  return linearProgress < 0.5
+    ? 4 * linearProgress * linearProgress * linearProgress
+    : 1 - Math.pow(-2 * linearProgress + 2, 3) / 2
 }
 
-function getColorFilter(look: ColorLook): string {
-  switch (look) {
-    case 'warm':
-      return 'sepia(0.18) saturate(1.18) brightness(1.03)'
-    case 'crisp':
-      return 'contrast(1.12) saturate(1.14) brightness(1.02)'
-    case 'vintage':
-      return 'sepia(0.32) contrast(0.92) brightness(1.04) saturate(0.85)'
-    case 'cinematic':
-      return 'contrast(1.16) saturate(0.92) brightness(0.96)'
-    case 'bw':
-      return 'grayscale(1) contrast(1.14)'
-    case 'none':
-    default:
-      return 'none'
+/**
+ * Declarative map of ColorLook presets to standard CSS canvas filter strings (Open/Closed Principle).
+ */
+const COLOR_LOOK_FILTERS: Record<ColorLook, string> = {
+  none: 'none',
+  warm: 'sepia(0.18) saturate(1.18) brightness(1.03)',
+  crisp: 'contrast(1.12) saturate(1.14) brightness(1.02)',
+  vintage: 'sepia(0.32) contrast(0.92) brightness(1.04) saturate(0.85)',
+  cinematic: 'contrast(1.16) saturate(0.92) brightness(0.96)',
+  bw: 'grayscale(1) contrast(1.14)',
+}
+
+interface KenBurnsTransform {
+  scaleMultiplier: number
+  offsetX: number
+  offsetY: number
+}
+
+/**
+ * Computes a deterministic Ken Burns pan-and-zoom transform for a slide at `slideProgress` (`0..1`).
+ * Cycles through 4 distinct camera trajectories based on `kenBurnsSeed` so consecutive slides
+ * alternate motion direction naturally while remaining 100% reproducible between preview and export.
+ */
+function computeKenBurnsTransform(
+  kenBurnsSeed: number,
+  slideProgress: number,
+  canvasWidth: number,
+  canvasHeight: number,
+  effects: SmartEffectsConfig,
+): KenBurnsTransform {
+  if (!effects.kenBurns) {
+    return { scaleMultiplier: 1, offsetX: 0, offsetY: 0 }
   }
+
+  const intensity = effects.kenBurnsIntensity
+  const motionMode = kenBurnsSeed % 4
+  let scaleMultiplier = 1
+  let offsetX = 0
+
+  if (motionMode === 0) {
+    // Mode 0: Slow zoom in toward center
+    scaleMultiplier = 1 + intensity * slideProgress
+  } else if (motionMode === 1) {
+    // Mode 1: Slow zoom out from pre-zoomed frame
+    scaleMultiplier = 1 + intensity * (1 - slideProgress)
+  } else if (motionMode === 2) {
+    // Mode 2: Gentle pan from left to right while zoomed in
+    scaleMultiplier = 1 + intensity
+    offsetX = (slideProgress - 0.5) * canvasWidth * intensity * 0.55
+  } else {
+    // Mode 3: Gentle pan from right to left while zoomed in
+    scaleMultiplier = 1 + intensity
+    offsetX = (0.5 - slideProgress) * canvasWidth * intensity * 0.55
+  }
+
+  // Add subtle vertical drift (-1, 0, or +1 direction) for organic camera movement
+  const verticalDirection = (kenBurnsSeed % 3) - 1
+  const offsetY = verticalDirection * canvasHeight * intensity * 0.12 * (slideProgress - 0.5)
+
+  return { scaleMultiplier, offsetX, offsetY }
+}
+
+/**
+ * Determines whether a slide needs a blurred background fill because its aspect ratio
+ * differs noticeably from the output video frame.
+ */
+function shouldRenderBlurredBackdrop(
+  fitMode: FitMode,
+  canvasWidth: number,
+  canvasHeight: number,
+  orientedImageWidth: number,
+  orientedImageHeight: number,
+): boolean {
+  if (fitMode !== 'blur-fill') return false
+  const canvasAspect = canvasWidth / canvasHeight
+  const imageAspect = orientedImageWidth / orientedImageHeight
+  return Math.abs(canvasAspect - imageAspect) > ASPECT_MISMATCH_TOLERANCE
+}
+
+type TransitionComposer = (
+  targetCtx: CanvasRenderingContext2D,
+  outgoingCanvas: HTMLCanvasElement,
+  incomingCanvas: HTMLCanvasElement,
+  canvasWidth: number,
+  canvasHeight: number,
+  easedProgress: number,
+) => void
+
+/**
+ * Strategy registry mapping each `TransitionType` to its canvas compositing implementation.
+ * Following the Open/Closed Principle, new transitions can be added as declarative entries here.
+ */
+const TRANSITION_COMPOSERS: Record<TransitionType, TransitionComposer> = {
+  cut: (targetCtx, _outgoing, incomingCanvas) => {
+    targetCtx.drawImage(incomingCanvas, 0, 0)
+  },
+
+  crossfade: (targetCtx, outgoingCanvas, incomingCanvas, _w, _h, easedProgress) => {
+    targetCtx.drawImage(outgoingCanvas, 0, 0)
+    targetCtx.globalAlpha = easedProgress
+    targetCtx.drawImage(incomingCanvas, 0, 0)
+  },
+
+  'slide-left': (targetCtx, outgoingCanvas, incomingCanvas, canvasWidth, _h, easedProgress) => {
+    targetCtx.drawImage(outgoingCanvas, 0, 0)
+    targetCtx.drawImage(incomingCanvas, canvasWidth * (1 - easedProgress), 0)
+  },
+
+  'slide-right': (targetCtx, outgoingCanvas, incomingCanvas, canvasWidth, _h, easedProgress) => {
+    targetCtx.drawImage(outgoingCanvas, 0, 0)
+    targetCtx.drawImage(incomingCanvas, -canvasWidth * (1 - easedProgress), 0)
+  },
+
+  'slide-up': (targetCtx, outgoingCanvas, incomingCanvas, _w, canvasHeight, easedProgress) => {
+    targetCtx.drawImage(outgoingCanvas, 0, 0)
+    targetCtx.drawImage(incomingCanvas, 0, canvasHeight * (1 - easedProgress))
+  },
+
+  'push-left': (targetCtx, outgoingCanvas, incomingCanvas, canvasWidth, _h, easedProgress) => {
+    targetCtx.drawImage(outgoingCanvas, -canvasWidth * easedProgress, 0)
+    targetCtx.drawImage(incomingCanvas, canvasWidth * (1 - easedProgress), 0)
+  },
+
+  'zoom-in': (
+    targetCtx,
+    outgoingCanvas,
+    incomingCanvas,
+    canvasWidth,
+    canvasHeight,
+    easedProgress,
+  ) => {
+    targetCtx.drawImage(outgoingCanvas, 0, 0)
+    const incomingScale = 0.82 + 0.18 * easedProgress
+    targetCtx.globalAlpha = easedProgress
+    targetCtx.translate(canvasWidth / 2, canvasHeight / 2)
+    targetCtx.scale(incomingScale, incomingScale)
+    targetCtx.drawImage(incomingCanvas, -canvasWidth / 2, -canvasHeight / 2)
+  },
+
+  'zoom-out': (
+    targetCtx,
+    outgoingCanvas,
+    incomingCanvas,
+    canvasWidth,
+    canvasHeight,
+    easedProgress,
+  ) => {
+    targetCtx.drawImage(incomingCanvas, 0, 0)
+    const outgoingScale = 1 + 0.18 * easedProgress
+    targetCtx.globalAlpha = 1 - easedProgress
+    targetCtx.translate(canvasWidth / 2, canvasHeight / 2)
+    targetCtx.scale(outgoingScale, outgoingScale)
+    targetCtx.drawImage(outgoingCanvas, -canvasWidth / 2, -canvasHeight / 2)
+  },
+
+  'blur-dissolve': (targetCtx, outgoingCanvas, incomingCanvas, _w, _h, easedProgress) => {
+    // Peak blur occurs at transition midpoint (sin(pi * 0.5) = 1.0) and settles back to 0px at completion
+    const blurRadiusPx = Math.sin(easedProgress * Math.PI) * 14
+    targetCtx.filter = `blur(${blurRadiusPx.toFixed(1)}px)`
+    targetCtx.drawImage(outgoingCanvas, 0, 0)
+    targetCtx.globalAlpha = easedProgress
+    targetCtx.drawImage(incomingCanvas, 0, 0)
+  },
+
+  'dip-black': (targetCtx, outgoingCanvas, incomingCanvas, canvasWidth, canvasHeight, easedProgress) => {
+    targetCtx.fillStyle = '#000000'
+    targetCtx.fillRect(0, 0, canvasWidth, canvasHeight)
+    if (easedProgress < 0.5) {
+      targetCtx.globalAlpha = 1 - easedProgress * 2
+      targetCtx.drawImage(outgoingCanvas, 0, 0)
+    } else {
+      targetCtx.globalAlpha = (easedProgress - 0.5) * 2
+      targetCtx.drawImage(incomingCanvas, 0, 0)
+    }
+  },
+
+  'wipe-left': (
+    targetCtx,
+    outgoingCanvas,
+    incomingCanvas,
+    canvasWidth,
+    canvasHeight,
+    easedProgress,
+  ) => {
+    targetCtx.drawImage(outgoingCanvas, 0, 0)
+    targetCtx.beginPath()
+    targetCtx.rect(0, 0, canvasWidth * easedProgress, canvasHeight)
+    targetCtx.clip()
+    targetCtx.drawImage(incomingCanvas, 0, 0)
+  },
 }
 
 /**
  * Shared WYSIWYG Canvas 2D renderer used by BOTH the live Preview and the MP4/WebM Exporter.
- * Reuses two offscreen scratch canvases so there are zero per-frame allocations.
+ * Pre-allocates two reusable scratch canvases and a downsampled blur canvas so rendering
+ * performs zero per-frame DOM allocations.
  */
 export class SlideshowRenderer {
-  private scratchA: HTMLCanvasElement
-  private ctxA: CanvasRenderingContext2D
-  private scratchB: HTMLCanvasElement
-  private ctxB: CanvasRenderingContext2D
-  private blurCanvas: HTMLCanvasElement
-  private blurCtx: CanvasRenderingContext2D
+  private outgoingScratchCanvas: HTMLCanvasElement
+  private outgoingScratchCtx: CanvasRenderingContext2D
+  private incomingScratchCanvas: HTMLCanvasElement
+  private incomingScratchCtx: CanvasRenderingContext2D
+  private blurScratchCanvas: HTMLCanvasElement
+  private blurScratchCtx: CanvasRenderingContext2D
 
   constructor() {
-    this.scratchA = document.createElement('canvas')
-    this.ctxA = this.scratchA.getContext('2d', { alpha: false })!
-    this.scratchB = document.createElement('canvas')
-    this.ctxB = this.scratchB.getContext('2d', { alpha: false })!
-    // Small dedicated canvas for fast blurred backdrop generation
-    this.blurCanvas = document.createElement('canvas')
-    this.blurCanvas.width = 96
-    this.blurCanvas.height = 96
-    this.blurCtx = this.blurCanvas.getContext('2d', { alpha: false })!
+    this.outgoingScratchCanvas = document.createElement('canvas')
+    this.outgoingScratchCtx = this.outgoingScratchCanvas.getContext('2d', { alpha: false })!
+    this.incomingScratchCanvas = document.createElement('canvas')
+    this.incomingScratchCtx = this.incomingScratchCanvas.getContext('2d', { alpha: false })!
+
+    this.blurScratchCanvas = document.createElement('canvas')
+    this.blurScratchCanvas.width = BLUR_SCRATCH_DIMENSION_PX
+    this.blurScratchCanvas.height = BLUR_SCRATCH_DIMENSION_PX
+    this.blurScratchCtx = this.blurScratchCanvas.getContext('2d', { alpha: false })!
   }
 
-  private ensureSize(width: number, height: number) {
-    if (this.scratchA.width !== width || this.scratchA.height !== height) {
-      this.scratchA.width = width
-      this.scratchA.height = height
-      this.scratchB.width = width
-      this.scratchB.height = height
+  private ensureScratchCanvasSize(width: number, height: number) {
+    if (
+      this.outgoingScratchCanvas.width !== width ||
+      this.outgoingScratchCanvas.height !== height
+    ) {
+      this.outgoingScratchCanvas.width = width
+      this.outgoingScratchCanvas.height = height
+      this.incomingScratchCanvas.width = width
+      this.incomingScratchCanvas.height = height
     }
   }
 
   /**
-   * Finds the active slide index for a given timestamp.
+   * Finds the active slide index for a given timestamp in O(log N) time.
    */
-  findSlideAtTime(timeline: ComputedTimeline, time: number): number {
-    const slides = timeline.slides
-    if (slides.length === 0) return -1
-    if (time <= 0) return 0
-    if (time >= timeline.totalDuration) return slides.length - 1
-
-    // Binary search for fast lookup with hundreds of slides
-    let lo = 0
-    let hi = slides.length - 1
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1
-      const s = slides[mid]
-      if (time < s.startTime) {
-        hi = mid - 1
-      } else if (time >= s.endTime) {
-        lo = mid + 1
-      } else {
-        return mid
-      }
-    }
-    return Math.min(slides.length - 1, Math.max(0, lo))
+  findSlideAtTime(timeline: ComputedTimeline, timeSeconds: number): number {
+    return findSlideIndexAtTime(timeline, timeSeconds)
   }
 
   /**
-   * Renders a single frame at `time` (seconds) onto `ctx`.
+   * Renders a single video frame at `timeSeconds` onto `targetCtx`.
    */
   renderFrame(
-    ctx: CanvasRenderingContext2D,
-    width: number,
-    height: number,
-    time: number,
+    targetCtx: CanvasRenderingContext2D,
+    canvasWidth: number,
+    canvasHeight: number,
+    timeSeconds: number,
     timeline: ComputedTimeline,
     slides: SlideImage[],
-    getBitmap: (slideId: string) => ImageBitmap | null,
+    getBitmapById: (slideId: string) => ImageBitmap | null,
     effects: SmartEffectsConfig,
   ) {
-    this.ensureSize(width, height)
+    this.ensureScratchCanvasSize(canvasWidth, canvasHeight)
 
-    ctx.save()
-    ctx.fillStyle = '#09090b'
-    ctx.fillRect(0, 0, width, height)
+    targetCtx.save()
+    targetCtx.fillStyle = CANVAS_BACKGROUND_COLOR
+    targetCtx.fillRect(0, 0, canvasWidth, canvasHeight)
 
-    if (timeline.slides.length === 0) {
-      ctx.restore()
+    const activeTimelineIndex = findSlideIndexAtTime(timeline, timeSeconds)
+    if (activeTimelineIndex < 0) {
+      targetCtx.restore()
       return
     }
 
-    const idx = this.findSlideAtTime(timeline, time)
-    if (idx < 0) {
-      ctx.restore()
-      return
-    }
+    const currentTimelineSlide = timeline.slides[activeTimelineIndex]
+    const currentSlideImage = slides[currentTimelineSlide.slideIndex]
+    const currentBitmap = currentSlideImage ? getBitmapById(currentSlideImage.id) : null
 
-    const current = timeline.slides[idx]
-    const currentSlide = slides[current.slideIndex]
-    const currentBmp = currentSlide ? getBitmap(currentSlide.id) : null
+    const elapsedInCurrentSlide = Math.max(0, timeSeconds - currentTimelineSlide.startTime)
+    const isWithinIncomingTransition =
+      activeTimelineIndex > 0 &&
+      currentTimelineSlide.transitionIn !== 'cut' &&
+      currentTimelineSlide.transitionInDuration > 0 &&
+      elapsedInCurrentSlide < currentTimelineSlide.transitionInDuration
 
-    const localTime = Math.max(0, time - current.startTime)
-    const inTransition =
-      idx > 0 &&
-      current.transitionIn !== 'cut' &&
-      current.transitionInDuration > 0 &&
-      localTime < current.transitionInDuration
+    if (isWithinIncomingTransition) {
+      const previousTimelineSlide = timeline.slides[activeTimelineIndex - 1]
+      const previousSlideImage = slides[previousTimelineSlide.slideIndex]
+      const previousBitmap = previousSlideImage ? getBitmapById(previousSlideImage.id) : null
 
-    if (inTransition) {
-      const prev = timeline.slides[idx - 1]
-      const prevSlide = slides[prev.slideIndex]
-      const prevBmp = prevSlide ? getBitmap(prevSlide.id) : null
+      const previousSlideProgress = Math.min(
+        1,
+        (timeSeconds - previousTimelineSlide.startTime) /
+          Math.max(0.01, previousTimelineSlide.duration),
+      )
+      const currentSlideProgress = Math.min(
+        1,
+        elapsedInCurrentSlide / Math.max(0.01, currentTimelineSlide.duration),
+      )
 
-      const prevProgress = Math.min(1, (time - prev.startTime) / Math.max(0.01, prev.duration))
-      const currProgress = Math.min(1, localTime / Math.max(0.01, current.duration))
+      this.drawSingleSlide(
+        this.outgoingScratchCtx,
+        canvasWidth,
+        canvasHeight,
+        previousBitmap,
+        previousSlideImage,
+        previousTimelineSlide,
+        previousSlideProgress,
+        effects,
+      )
+      this.drawSingleSlide(
+        this.incomingScratchCtx,
+        canvasWidth,
+        canvasHeight,
+        currentBitmap,
+        currentSlideImage,
+        currentTimelineSlide,
+        currentSlideProgress,
+        effects,
+      )
 
-      this.drawSingleSlide(this.ctxA, width, height, prevBmp, prevSlide, prev, prevProgress, effects)
-      this.drawSingleSlide(this.ctxB, width, height, currentBmp, currentSlide, current, currProgress, effects)
+      const linearTransitionProgress = Math.max(
+        0,
+        Math.min(1, elapsedInCurrentSlide / currentTimelineSlide.transitionInDuration),
+      )
+      const easedTransitionProgress = easeInOutCubic(linearTransitionProgress)
 
-      const rawT = Math.max(0, Math.min(1, localTime / current.transitionInDuration))
-      const t = easeInOutCubic(rawT)
-      this.composeTransition(ctx, width, height, current.transitionIn, t)
+      this.composeTransition(
+        targetCtx,
+        canvasWidth,
+        canvasHeight,
+        currentTimelineSlide.transitionIn,
+        easedTransitionProgress,
+      )
     } else {
-      const progress = Math.min(1, localTime / Math.max(0.01, current.duration))
-      this.drawSingleSlide(ctx, width, height, currentBmp, currentSlide, current, progress, effects)
+      const currentSlideProgress = Math.min(
+        1,
+        elapsedInCurrentSlide / Math.max(0.01, currentTimelineSlide.duration),
+      )
+      this.drawSingleSlide(
+        targetCtx,
+        canvasWidth,
+        canvasHeight,
+        currentBitmap,
+        currentSlideImage,
+        currentTimelineSlide,
+        currentSlideProgress,
+        effects,
+      )
     }
 
-    // Optional subtle cinematic vignette
     if (effects.vignette) {
-      const cx = width / 2
-      const cy = height / 2
-      const rOuter = Math.hypot(cx, cy)
-      const grad = ctx.createRadialGradient(cx, cy, rOuter * 0.42, cx, cy, rOuter)
-      grad.addColorStop(0, 'rgba(0,0,0,0)')
-      grad.addColorStop(1, 'rgba(0,0,0,0.48)')
-      ctx.fillStyle = grad
-      ctx.fillRect(0, 0, width, height)
+      this.renderVignetteOverlay(targetCtx, canvasWidth, canvasHeight)
     }
 
-    ctx.restore()
+    targetCtx.restore()
   }
 
   private drawSingleSlide(
-    ctx: CanvasRenderingContext2D,
-    width: number,
-    height: number,
-    bmp: ImageBitmap | null,
+    targetCtx: CanvasRenderingContext2D,
+    canvasWidth: number,
+    canvasHeight: number,
+    imageBitmap: ImageBitmap | null,
     slide: SlideImage | undefined,
-    tSlide: TimelineSlide,
-    progress: number,
+    timelineSlide: TimelineSlide,
+    slideProgress: number,
     effects: SmartEffectsConfig,
   ) {
-    ctx.save()
-    ctx.fillStyle = '#09090b'
-    ctx.fillRect(0, 0, width, height)
+    targetCtx.save()
+    targetCtx.fillStyle = CANVAS_BACKGROUND_COLOR
+    targetCtx.fillRect(0, 0, canvasWidth, canvasHeight)
 
-    if (!bmp || !slide) {
-      ctx.restore()
+    if (!imageBitmap || !slide) {
+      targetCtx.restore()
       return
     }
 
-    const rotDeg = slide.rotation || 0
-    const rotRad = (rotDeg * Math.PI) / 180
-    const swapped = rotDeg === 90 || rotDeg === 270
-    const imgW = swapped ? bmp.height : bmp.width
-    const imgH = swapped ? bmp.width : bmp.height
+    const rotationDegrees = slide.rotation || 0
+    const rotationRadians = (rotationDegrees * Math.PI) / 180
+    // When rotated 90° or 270°, the image's effective horizontal and vertical dimensions swap
+    const isQuarterTurnRotated = rotationDegrees === 90 || rotationDegrees === 270
+    const orientedImageWidth = isQuarterTurnRotated ? imageBitmap.height : imageBitmap.width
+    const orientedImageHeight = isQuarterTurnRotated ? imageBitmap.width : imageBitmap.height
 
-    const colorFilter = getColorFilter(effects.colorLook)
-
-    // Ken Burns smooth scale & pan
-    let kbScale = 1
-    let kbOffsetX = 0
-    let kbOffsetY = 0
-    if (effects.kenBurns) {
-      const intensity = effects.kenBurnsIntensity
-      const mode = tSlide.kenBurnsSeed % 4
-      if (mode === 0) {
-        // Gentle zoom in
-        kbScale = 1 + intensity * progress
-      } else if (mode === 1) {
-        // Gentle zoom out
-        kbScale = 1 + intensity * (1 - progress)
-      } else if (mode === 2) {
-        // Pan left to right while slightly zoomed
-        kbScale = 1 + intensity
-        kbOffsetX = (progress - 0.5) * width * intensity * 0.55
-      } else {
-        // Pan right to left while slightly zoomed
-        kbScale = 1 + intensity
-        kbOffsetX = (0.5 - progress) * width * intensity * 0.55
-      }
-      kbOffsetY = ((tSlide.kenBurnsSeed % 3) - 1) * height * intensity * 0.12 * (progress - 0.5)
-    }
-
-    // 1. Blurred Backdrop when fitMode === 'blur-fill' and aspect ratios differ noticeably
-    const canvasAspect = width / height
-    const imgAspect = imgW / imgH
-    const needsBackdrop = effects.fitMode === 'blur-fill' && Math.abs(canvasAspect - imgAspect) > 0.04
+    const colorFilter = COLOR_LOOK_FILTERS[effects.colorLook] ?? 'none'
+    const needsBackdrop = shouldRenderBlurredBackdrop(
+      effects.fitMode,
+      canvasWidth,
+      canvasHeight,
+      orientedImageWidth,
+      orientedImageHeight,
+    )
 
     if (needsBackdrop) {
-      // Blur directly on the tiny 96x96 offscreen canvas, then upscale smoothly.
-      // This is ~20x faster than running a 24px blur filter over a full 1080p/4K canvas.
-      const bw = this.blurCanvas.width
-      const bh = this.blurCanvas.height
-      this.blurCtx.save()
-      this.blurCtx.fillStyle = '#09090b'
-      this.blurCtx.fillRect(0, 0, bw, bh)
-      this.blurCtx.filter =
-        colorFilter !== 'none'
-          ? `blur(5px) brightness(0.55) ${colorFilter}`
-          : 'blur(5px) brightness(0.55)'
-      this.blurCtx.translate(bw / 2, bh / 2)
-      this.blurCtx.rotate(rotRad)
-      const bgScale = Math.max(bw / imgW, bh / imgH) * 1.25
-      const drawW = bmp.width * bgScale
-      const drawH = bmp.height * bgScale
-      this.blurCtx.drawImage(bmp, -drawW / 2, -drawH / 2, drawW, drawH)
-      this.blurCtx.restore()
-
-      ctx.save()
-      ctx.imageSmoothingEnabled = true
-      ctx.imageSmoothingQuality = 'high'
-      // Overscan slightly to hide softened edges
-      const padX = Math.round(width * 0.06)
-      const padY = Math.round(height * 0.06)
-      ctx.drawImage(this.blurCanvas, -padX, -padY, width + padX * 2, height + padY * 2)
-      ctx.restore()
+      this.renderBlurredBackdrop(
+        targetCtx,
+        canvasWidth,
+        canvasHeight,
+        imageBitmap,
+        orientedImageWidth,
+        orientedImageHeight,
+        rotationRadians,
+        colorFilter,
+      )
     }
 
-    // 2. Foreground photo
-    ctx.save()
+    const kenBurnsTransform = computeKenBurnsTransform(
+      timelineSlide.kenBurnsSeed,
+      slideProgress,
+      canvasWidth,
+      canvasHeight,
+      effects,
+    )
+
+    this.renderForegroundPhoto(
+      targetCtx,
+      canvasWidth,
+      canvasHeight,
+      imageBitmap,
+      orientedImageWidth,
+      orientedImageHeight,
+      rotationRadians,
+      colorFilter,
+      effects.fitMode,
+      needsBackdrop,
+      kenBurnsTransform,
+    )
+
+    targetCtx.restore()
+  }
+
+  /**
+   * Renders a soft, darkened blurred copy of the image to fill letterbox/pillarbox bars.
+   * Optimization: blurs on a tiny 96x96 scratch canvas and upscales with high-quality bilinear
+   * smoothing (~20x faster than applying a 24px Gaussian filter across a full 1080p/4K frame).
+   */
+  private renderBlurredBackdrop(
+    targetCtx: CanvasRenderingContext2D,
+    canvasWidth: number,
+    canvasHeight: number,
+    imageBitmap: ImageBitmap,
+    orientedImageWidth: number,
+    orientedImageHeight: number,
+    rotationRadians: number,
+    colorFilter: string,
+  ) {
+    const scratchWidth = this.blurScratchCanvas.width
+    const scratchHeight = this.blurScratchCanvas.height
+
+    this.blurScratchCtx.save()
+    this.blurScratchCtx.fillStyle = CANVAS_BACKGROUND_COLOR
+    this.blurScratchCtx.fillRect(0, 0, scratchWidth, scratchHeight)
+    this.blurScratchCtx.filter =
+      colorFilter !== 'none'
+        ? `blur(5px) brightness(0.55) ${colorFilter}`
+        : 'blur(5px) brightness(0.55)'
+    this.blurScratchCtx.translate(scratchWidth / 2, scratchHeight / 2)
+    this.blurScratchCtx.rotate(rotationRadians)
+
+    const backdropCoverScale =
+      Math.max(scratchWidth / orientedImageWidth, scratchHeight / orientedImageHeight) * 1.25
+    const scaledWidth = imageBitmap.width * backdropCoverScale
+    const scaledHeight = imageBitmap.height * backdropCoverScale
+    this.blurScratchCtx.drawImage(
+      imageBitmap,
+      -scaledWidth / 2,
+      -scaledHeight / 2,
+      scaledWidth,
+      scaledHeight,
+    )
+    this.blurScratchCtx.restore()
+
+    targetCtx.save()
+    targetCtx.imageSmoothingEnabled = true
+    targetCtx.imageSmoothingQuality = 'high'
+    // Overscan by 6% so blurred edges never bleed dark vignette borders at the frame perimeter
+    const overscanPaddingX = Math.round(canvasWidth * 0.06)
+    const overscanPaddingY = Math.round(canvasHeight * 0.06)
+    targetCtx.drawImage(
+      this.blurScratchCanvas,
+      -overscanPaddingX,
+      -overscanPaddingY,
+      canvasWidth + overscanPaddingX * 2,
+      canvasHeight + overscanPaddingY * 2,
+    )
+    targetCtx.restore()
+  }
+
+  private renderForegroundPhoto(
+    targetCtx: CanvasRenderingContext2D,
+    canvasWidth: number,
+    canvasHeight: number,
+    imageBitmap: ImageBitmap,
+    orientedImageWidth: number,
+    orientedImageHeight: number,
+    rotationRadians: number,
+    colorFilter: string,
+    fitMode: FitMode,
+    hasBlurredBackdrop: boolean,
+    kenBurns: KenBurnsTransform,
+  ) {
+    targetCtx.save()
     if (colorFilter !== 'none') {
-      ctx.filter = colorFilter
+      targetCtx.filter = colorFilter
     }
 
-    let baseScale: number
-    if (effects.fitMode === 'cover') {
-      baseScale = Math.max(width / imgW, height / imgH)
-    } else {
-      baseScale = Math.min(width / imgW, height / imgH)
+    const baseFitScale =
+      fitMode === 'cover'
+        ? Math.max(canvasWidth / orientedImageWidth, canvasHeight / orientedImageHeight)
+        : Math.min(canvasWidth / orientedImageWidth, canvasHeight / orientedImageHeight)
+
+    const finalScale = baseFitScale * kenBurns.scaleMultiplier
+    const drawWidth = imageBitmap.width * finalScale
+    const drawHeight = imageBitmap.height * finalScale
+
+    targetCtx.translate(
+      canvasWidth / 2 + kenBurns.offsetX,
+      canvasHeight / 2 + kenBurns.offsetY,
+    )
+    targetCtx.rotate(rotationRadians)
+
+    if (hasBlurredBackdrop) {
+      targetCtx.shadowColor = 'rgba(0, 0, 0, 0.55)'
+      targetCtx.shadowBlur = Math.max(16, Math.round(canvasWidth * 0.02))
     }
 
-    const finalScale = baseScale * kbScale
-    const drawW = bmp.width * finalScale
-    const drawH = bmp.height * finalScale
+    targetCtx.drawImage(imageBitmap, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight)
+    targetCtx.restore()
+  }
 
-    ctx.translate(width / 2 + kbOffsetX, height / 2 + kbOffsetY)
-    ctx.rotate(rotRad)
-
-    if (needsBackdrop) {
-      ctx.shadowColor = 'rgba(0, 0, 0, 0.55)'
-      ctx.shadowBlur = Math.max(16, Math.round(width * 0.02))
-    }
-
-    ctx.drawImage(bmp, -drawW / 2, -drawH / 2, drawW, drawH)
-    ctx.restore()
-    ctx.restore()
+  private renderVignetteOverlay(
+    targetCtx: CanvasRenderingContext2D,
+    canvasWidth: number,
+    canvasHeight: number,
+  ) {
+    const centerX = canvasWidth / 2
+    const centerY = canvasHeight / 2
+    const cornerRadius = Math.hypot(centerX, centerY)
+    const radialGradient = targetCtx.createRadialGradient(
+      centerX,
+      centerY,
+      cornerRadius * 0.42,
+      centerX,
+      centerY,
+      cornerRadius,
+    )
+    radialGradient.addColorStop(0, 'rgba(0,0,0,0)')
+    radialGradient.addColorStop(1, 'rgba(0,0,0,0.48)')
+    targetCtx.fillStyle = radialGradient
+    targetCtx.fillRect(0, 0, canvasWidth, canvasHeight)
   }
 
   private composeTransition(
-    ctx: CanvasRenderingContext2D,
-    width: number,
-    height: number,
-    type: TransitionType,
-    t: number,
+    targetCtx: CanvasRenderingContext2D,
+    canvasWidth: number,
+    canvasHeight: number,
+    transitionType: TransitionType,
+    easedProgress: number,
   ) {
-    ctx.save()
-    switch (type) {
-      case 'crossfade': {
-        ctx.drawImage(this.scratchA, 0, 0)
-        ctx.globalAlpha = t
-        ctx.drawImage(this.scratchB, 0, 0)
-        break
-      }
-      case 'slide-left': {
-        ctx.drawImage(this.scratchA, 0, 0)
-        ctx.drawImage(this.scratchB, width * (1 - t), 0)
-        break
-      }
-      case 'slide-right': {
-        ctx.drawImage(this.scratchA, 0, 0)
-        ctx.drawImage(this.scratchB, -width * (1 - t), 0)
-        break
-      }
-      case 'slide-up': {
-        ctx.drawImage(this.scratchA, 0, 0)
-        ctx.drawImage(this.scratchB, 0, height * (1 - t))
-        break
-      }
-      case 'push-left': {
-        ctx.drawImage(this.scratchA, -width * t, 0)
-        ctx.drawImage(this.scratchB, width * (1 - t), 0)
-        break
-      }
-      case 'zoom-in': {
-        ctx.drawImage(this.scratchA, 0, 0)
-        const s = 0.82 + 0.18 * t
-        ctx.globalAlpha = t
-        ctx.translate(width / 2, height / 2)
-        ctx.scale(s, s)
-        ctx.drawImage(this.scratchB, -width / 2, -height / 2)
-        break
-      }
-      case 'zoom-out': {
-        ctx.drawImage(this.scratchB, 0, 0)
-        const s = 1 + 0.18 * t
-        ctx.globalAlpha = 1 - t
-        ctx.translate(width / 2, height / 2)
-        ctx.scale(s, s)
-        ctx.drawImage(this.scratchA, -width / 2, -height / 2)
-        break
-      }
-      case 'blur-dissolve': {
-        const blurAmt = Math.sin(t * Math.PI) * 14
-        ctx.filter = `blur(${blurAmt.toFixed(1)}px)`
-        ctx.drawImage(this.scratchA, 0, 0)
-        ctx.globalAlpha = t
-        ctx.drawImage(this.scratchB, 0, 0)
-        break
-      }
-      case 'dip-black': {
-        ctx.fillStyle = '#000000'
-        ctx.fillRect(0, 0, width, height)
-        if (t < 0.5) {
-          ctx.globalAlpha = 1 - t * 2
-          ctx.drawImage(this.scratchA, 0, 0)
-        } else {
-          ctx.globalAlpha = (t - 0.5) * 2
-          ctx.drawImage(this.scratchB, 0, 0)
-        }
-        break
-      }
-      case 'wipe-left': {
-        ctx.drawImage(this.scratchA, 0, 0)
-        ctx.beginPath()
-        ctx.rect(0, 0, width * t, height)
-        ctx.clip()
-        ctx.drawImage(this.scratchB, 0, 0)
-        break
-      }
-      case 'cut':
-      default: {
-        ctx.drawImage(this.scratchB, 0, 0)
-        break
-      }
-    }
-    ctx.restore()
+    targetCtx.save()
+    const composer = TRANSITION_COMPOSERS[transitionType] ?? TRANSITION_COMPOSERS.cut
+    composer(
+      targetCtx,
+      this.outgoingScratchCanvas,
+      this.incomingScratchCanvas,
+      canvasWidth,
+      canvasHeight,
+      easedProgress,
+    )
+    targetCtx.restore()
   }
 }
