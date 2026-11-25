@@ -14,7 +14,7 @@ description: Architecture and constraints for Web Audio decoding, CORS music lin
 ## Key Details
 
 1. **`markRaw(buffer)` is required:** Never let Vue deeply proxy an `AudioBuffer`. Always assign `music.audioBuffer = markRaw(buffer)`.
-2. **Preview & Export Audio Parity:** Both `PreviewAudioPlayer.start()` and `renderExportAudioBuffer()` must honor the exact same parameters:
+2. **Preview & Export Audio Parity (`configureLoopingAudioSource` & `scheduleAudioFadeEnvelope`):** Both `PreviewAudioPlayer.start()` and `renderExportAudioBuffer()` delegate to the shared `computePlayableTrackBounds()`, `configureLoopingAudioSource()`, and `scheduleAudioFadeEnvelope()` helpers so they honor identical parameters:
    - `startOffset` (where playback begins inside the track)
    - `loop` (sets `loopStart = startOffset`, `loopEnd = buffer.duration`)
    - `volume` (`0..1`)

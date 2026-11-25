@@ -13,19 +13,21 @@ description: Guide for maintaining and extending the client-side WebCodecs MP4/W
 
 ## Pipeline Overview
 
-1. **Dimension Alignment:** H.264 and VP9 encoders require even dimensions (`width - (width % 2)`).
-2. **Codec Probing (`pickVideoCodec` & `pickAudioCodec`):**
+1. **Dimension Alignment:** H.264 and VP9 encoders require even dimensions (`output.width - (output.width % 2)`).
+2. **Codec Probing (`selectSupportedVideoCodec` & `selectSupportedAudioCodec`):**
    - Probes `VideoEncoder.isConfigSupported()` with `latencyMode: 'realtime'` (disables out-of-order B-frame reordering required by `mp4-muxer`) from High profile down to Baseline (for MP4) or VP9 -> VP8 (for WebM).
    - For MP4 audio, probes `mp4a.40.2` (AAC) first and falls back to `opus` (`mp4-muxer` supports Opus in MP4) so exports retain audio even on Linux Chromium builds without a native AAC encoder.
-3. **Audio Mixing & Encoding:**
+3. **Unified Container Muxer (`MediaContainerMuxer` / `createContainerMuxer`):**
+   - Wraps `Mp4Muxer` and `WebmMuxer` behind a single polymorphic interface (`addVideoChunk`, `addAudioChunk`, `finalizeToBlob`) so encoding pipelines remain container-agnostic (Dependency Inversion Principle).
+4. **Audio Mixing & Encoding (`encodeAudioTrackToMuxer`):**
    - Uses `renderExportAudioBuffer()` (`OfflineAudioContext`) to bake volume, looping, start offset, and fade-in/out into stereo 48 kHz PCM.
-   - Encodes PCM in `4096`-sample chunks using `format: 'f32-planar'` (channel 0 followed by channel 1 in a single `Float32Array`).
+   - Packs PCM in `4096`-sample chunks via `packStereoChunkAsPlanarFloat32()` using `format: 'f32-planar'` (channel 0 followed contiguously by channel 1).
    - Always call `audioData.close()` immediately after `audioEncoder.encode(audioData)`.
-4. **Frame-by-Frame Video Encoding:**
-   - Uses a dedicated `BitmapCache(6, maxDim)` isolated from the preview cache so export cleans up all bitmaps in `finally`.
+5. **Frame-by-Frame Video Encoding (`encodeVideoFramesToMuxer`):**
+   - Uses a dedicated `BitmapCache(6, maxDim)` isolated from the preview cache and calls `exportBitmapCache.ensureSlideWindowLoaded(...)` per frame.
    - Creates `new VideoFrame(renderCanvas, { timestamp, duration })`, encodes with a keyframe every `fps * 2` frames, and immediately calls `videoFrame.close()`.
-   - Enforces backpressure (`while (videoEncoder.encodeQueueSize > 8) await yieldToMain()`) so GPU memory never grows unbounded on long slideshows.
-5. **Cancellation & Cleanup:** Always check `signal.aborted` inside audio and video loops, close encoders safely on error/cancel, and call `exportCache.clear()` in `finally`.
+   - Enforces backpressure (`while (videoEncoder.encodeQueueSize > MAX_VIDEO_ENCODE_QUEUE_SIZE ...) await yieldToMainThread(8)`) so GPU memory never grows unbounded on long slideshows.
+6. **Cancellation & Cleanup:** Always check `signal.aborted` and `encoderError` inside audio and video loops, close encoders safely in `finally`, and call `exportBitmapCache.clear()`.
 
 ## Common Pitfalls
 

@@ -18,5 +18,5 @@ description: Memory and UI responsiveness discipline for handling 100-500+ high-
 3. **Always revoke Blob URLs.** When removing a slide (`removeSlide`) or clearing all (`clearAllSlides`), call `URL.revokeObjectURL(slide.thumbnailUrl)`.
 4. **Limit concurrent thumbnail decoding.** `ThumbnailQueue` caps concurrency at `4` and scales thumbnails to `220px` max side (`image/jpeg`, quality `0.78`). Do not use `FileReader.readAsDataURL` on raw multi-megabyte photos.
 5. **Respect EXIF orientation.** Always pass `{ imageOrientation: 'from-image' }` to `createImageBitmap()` so smartphone photos are never rotated sideways.
-6. **Binary search the timeline.** `findSlideAtTime()` in `renderer.ts` and `activeSlideIndex` in `useSlideshow.ts` use O(log N) binary search so scrubbing stays instant with hundreds of slides.
-7. **Preload ahead by 2–3 slides.** Both `PreviewStage.vue` and `exporter.ts` preload the next 2–3 slides asynchronously while rendering the current slide to eliminate transition hitching.
+6. **Binary search the timeline.** `findSlideIndexAtTime()` in `src/engine/timeline.ts` uses O(log N) binary search and is shared across `useSlideshow.ts`, `PreviewStage.vue`, `SlideshowRenderer`, and `exporter.ts`.
+7. **Use `BitmapCache.ensureSlideWindowLoaded()` for sliding-window preloading.** Both `PreviewStage.vue` and `exporter.ts` call `bitmapCache.ensureSlideWindowLoaded(...)` to load the active and outgoing slides while preloading the next 2–3 slides asynchronously.

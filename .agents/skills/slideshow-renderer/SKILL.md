@@ -21,14 +21,14 @@ description: Rules and workflow for modifying Canvas 2D rendering, transitions, 
 ## Adding a New Transition
 
 1. Add the union member to `TransitionType` and label to `TRANSITION_OPTIONS` in `src/types/slideshow.ts`.
-2. Add a `case` in `SlideshowRenderer.composeTransition()` in `src/engine/renderer.ts`.
-   - `this.scratchA` holds the outgoing slide at `width × height`.
-   - `this.scratchB` holds the incoming slide at `width × height`.
-   - `t` is eased (`easeInOutCubic`) in `[0, 1]`.
-3. Verify the transition works at both landscape (`1920×1080`) and portrait (`1080×1920`) aspect ratios using `width` and `height` proportionally (no hardcoded pixel distances).
+2. Add an entry to the declarative `TRANSITION_COMPOSERS` strategy map in `src/engine/renderer.ts`:
+   - `outgoingCanvas` holds the outgoing slide rendered at `canvasWidth × canvasHeight`.
+   - `incomingCanvas` holds the incoming slide rendered at `canvasWidth × canvasHeight`.
+   - `easedProgress` is cubic-eased (`easeInOutCubic`) in `[0, 1]`.
+3. Verify the transition works at both landscape (`1920×1080`) and portrait (`1080×1920`) aspect ratios using `canvasWidth` and `canvasHeight` proportionally (no hardcoded pixel distances).
 
 ## Adding a New Smart Effect or Color Look
 
-- For global color looks, extend `ColorLook` / `COLOR_LOOK_OPTIONS` and `getColorFilter()` in `src/engine/renderer.ts`.
+- For global color looks, extend `ColorLook` / `COLOR_LOOK_OPTIONS` in `src/types/slideshow.ts` and add the CSS filter string to `COLOR_LOOK_FILTERS` in `src/engine/renderer.ts`.
 - Remember that `ctx.filter` is supported in modern Chromium, Safari, and Firefox; keep filter strings standard CSS filter syntax.
-- For blurred backdrops (`fitMode === 'blur-fill'`), render into the tiny `96×96` `this.blurCanvas` first before upscaling with `blur(24px)` — blurring a full 4K image directly is 100× slower.
+- For blurred backdrops (`fitMode === 'blur-fill'`), `renderBlurredBackdrop()` renders and blurs directly on the tiny `96×96` `this.blurScratchCanvas` before upscaling with high-quality bilinear smoothing — blurring a full 4K image directly is ~20× slower.
