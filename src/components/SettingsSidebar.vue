@@ -68,7 +68,7 @@ const openSections = ref<Record<string, boolean>>({
   transitions: true,
   effects: false,
   music: false,
-  duplicates: true,
+  duplicates: false,
   output: false,
 })
 
