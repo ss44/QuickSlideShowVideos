@@ -190,9 +190,9 @@ onBeforeUnmount(() => {
       @close-ios-instructions="closeIosInstructions"
     />
 
-    <div class="flex min-h-0 flex-1 flex-col lg:flex-row">
+    <div class="flex min-h-0 flex-1 flex-col overflow-y-auto md:flex-row md:overflow-hidden">
       <!-- Left/Center Workspace: Preview + Filmstrip -->
-      <main class="flex min-h-0 min-w-0 flex-1 flex-col">
+      <main class="flex min-h-[480px] min-w-0 shrink-0 flex-1 flex-col md:min-h-0 md:shrink">
         <PreviewStage
           ref="previewStageRef"
           :slides="slides"
