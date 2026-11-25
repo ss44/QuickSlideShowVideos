@@ -1,4 +1,5 @@
-import type { ComputedTimeline, SlideImage } from '../types/slideshow'
+import type { ComputedTimeline, PerceptualFingerprint, SlideImage } from '../types/slideshow'
+import { computePerceptualFingerprintFromBitmap } from './duplicateDetector'
 
 const THUMBNAIL_MAX_DIMENSION_PX = 220
 const THUMBNAIL_JPEG_QUALITY = 0.78
@@ -14,6 +15,7 @@ type ThumbnailCompletionCallback = (
   thumbnailBlobUrl: string,
   naturalWidth: number,
   naturalHeight: number,
+  perceptualFingerprint: PerceptualFingerprint | null,
 ) => void
 
 interface ThumbnailGenerationJob {
@@ -46,13 +48,18 @@ class ThumbnailQueue {
       this.generateThumbnail(nextJob.slide)
         .then((result) => {
           if (result) {
-            nextJob.onComplete(result.thumbnailBlobUrl, result.naturalWidth, result.naturalHeight)
+            nextJob.onComplete(
+              result.thumbnailBlobUrl,
+              result.naturalWidth,
+              result.naturalHeight,
+              result.perceptualFingerprint,
+            )
           }
         })
         .catch(() => {
           // Fallback to direct object URL if createImageBitmap is unsupported for an exotic image subtype
           const fallbackObjectUrl = URL.createObjectURL(nextJob.slide.file)
-          nextJob.onComplete(fallbackObjectUrl, 1920, 1080)
+          nextJob.onComplete(fallbackObjectUrl, 1920, 1080, null)
         })
         .finally(() => {
           this.activeWorkerCount--
@@ -61,9 +68,12 @@ class ThumbnailQueue {
     }
   }
 
-  private async generateThumbnail(
-    slide: SlideImage,
-  ): Promise<{ thumbnailBlobUrl: string; naturalWidth: number; naturalHeight: number } | null> {
+  private async generateThumbnail(slide: SlideImage): Promise<{
+    thumbnailBlobUrl: string
+    naturalWidth: number
+    naturalHeight: number
+    perceptualFingerprint: PerceptualFingerprint | null
+  } | null> {
     const decodedBitmap = await createImageBitmap(slide.file, { imageOrientation: 'from-image' })
     const naturalWidth = decodedBitmap.width
     const naturalHeight = decodedBitmap.height
@@ -85,6 +95,8 @@ class ThumbnailQueue {
     }
 
     thumbCtx.drawImage(decodedBitmap, 0, 0, thumbWidth, thumbHeight)
+    // Piggyback perceptual fingerprinting on the already-decoded EXIF-oriented bitmap (zero extra decodes)
+    const perceptualFingerprint = computePerceptualFingerprintFromBitmap(decodedBitmap)
     decodedBitmap.close()
 
     const jpegBlob = await new Promise<Blob | null>((resolve) =>
@@ -96,6 +108,7 @@ class ThumbnailQueue {
       thumbnailBlobUrl: URL.createObjectURL(jpegBlob),
       naturalWidth,
       naturalHeight,
+      perceptualFingerprint,
     }
   }
 }

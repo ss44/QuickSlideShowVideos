@@ -21,6 +21,7 @@ const {
   effects,
   music,
   output,
+  duplicateDetection,
   timeline,
   estimatedSizeMB,
   activeSlideIndex,
@@ -232,6 +233,8 @@ onBeforeUnmount(() => {
         :effects="effects"
         :music="music"
         :output="output"
+        :duplicate-detection="duplicateDetection"
+        :removable-duplicate-count="duplicateAnalysis.removableCount"
         :slide-count="slides.length"
         :total-duration="timeline.totalDuration"
         @toggle-transition="toggleTransition"

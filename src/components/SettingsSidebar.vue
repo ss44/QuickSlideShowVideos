@@ -4,6 +4,7 @@ import {
   Clock,
   Wand2,
   Sparkles,
+  ScanSearch,
   Music,
   Sliders,
   Upload,
@@ -14,6 +15,7 @@ import {
   Loader2,
 } from 'lucide-vue-next'
 import type {
+  DuplicateDetectionConfig,
   MusicConfig,
   OutputConfig,
   SmartEffectsConfig,
@@ -30,6 +32,12 @@ import {
   TRANSITION_OPTIONS,
   VIDEO_QUALITY_OPTIONS,
 } from '../types/slideshow'
+import {
+  DUPLICATE_THRESHOLD_MAX_PERCENT,
+  DUPLICATE_THRESHOLD_MIN_PERCENT,
+  describeSimilarityThreshold,
+  formatSimilarityThresholdLabel,
+} from '../engine/duplicateDetector'
 import { formatTime } from '../utils/formatters'
 
 const props = defineProps<{
@@ -39,6 +47,8 @@ const props = defineProps<{
   effects: SmartEffectsConfig
   music: MusicConfig
   output: OutputConfig
+  duplicateDetection: DuplicateDetectionConfig
+  removableDuplicateCount: number
   slideCount: number
   totalDuration: number
 }>()
@@ -56,9 +66,10 @@ const emit = defineEmits<{
 const openSections = ref<Record<string, boolean>>({
   timing: true,
   transitions: true,
-  effects: true,
-  music: true,
-  output: true,
+  effects: false,
+  duplicates: true,
+  music: false,
+  output: false,
 })
 
 const musicUrlInput = ref('')
@@ -365,7 +376,79 @@ function submitMusicUrl() {
       </div>
     </div>
 
-    <!-- 4. MUSIC -->
+    <!-- 4. DUPLICATE DETECTION -->
+    <div class="border-b border-zinc-800/80">
+      <button
+        type="button"
+        class="flex w-full items-center justify-between px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-zinc-300 hover:bg-zinc-900/50"
+        @click="toggleSection('duplicates')"
+      >
+        <span class="flex items-center gap-2">
+          <ScanSearch class="h-3.5 w-3.5 text-amber-400" />
+          Duplicate Finder
+          <span
+            v-if="props.duplicateDetection.enabled && props.removableDuplicateCount > 0"
+            class="rounded-full bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-300"
+          >
+            {{ props.removableDuplicateCount }}
+          </span>
+        </span>
+        <ChevronDown
+          class="h-3.5 w-3.5 text-zinc-500 transition-transform"
+          :class="{ '-rotate-90': !openSections.duplicates }"
+        />
+      </button>
+
+      <div v-if="openSections.duplicates" class="px-4 pb-4">
+        <div class="rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-2.5">
+          <label class="flex cursor-pointer items-center justify-between">
+            <div>
+              <div class="text-xs font-medium text-zinc-200">Scan for Duplicates</div>
+              <div class="text-[11px] text-zinc-500">Highlight matching photos in filmstrip</div>
+            </div>
+            <input
+              v-model="props.duplicateDetection.enabled"
+              type="checkbox"
+              class="h-4 w-4 rounded accent-indigo-500"
+            />
+          </label>
+
+          <div v-if="props.duplicateDetection.enabled" class="mt-3 space-y-2">
+            <div class="flex items-center justify-between text-[11px]">
+              <span class="text-zinc-400">Similarity Threshold</span>
+              <span class="font-mono text-zinc-100">
+                {{ props.duplicateDetection.similarityThresholdPercent }}%
+                <span class="font-sans text-amber-300">
+                  · {{ formatSimilarityThresholdLabel(props.duplicateDetection.similarityThresholdPercent) }}
+                </span>
+              </span>
+            </div>
+
+            <input
+              v-model.number="props.duplicateDetection.similarityThresholdPercent"
+              type="range"
+              :min="DUPLICATE_THRESHOLD_MIN_PERCENT"
+              :max="DUPLICATE_THRESHOLD_MAX_PERCENT"
+              step="1"
+              class="w-full cursor-pointer"
+              aria-label="Duplicate similarity threshold"
+            />
+
+            <div class="flex items-center justify-between text-[10px] text-zinc-500">
+              <span>Loose ({{ DUPLICATE_THRESHOLD_MIN_PERCENT }}%)</span>
+              <span>Strict (95%)</span>
+              <span>Exact ({{ DUPLICATE_THRESHOLD_MAX_PERCENT }}%)</span>
+            </div>
+
+            <p class="text-[11px] text-zinc-400">
+              {{ describeSimilarityThreshold(props.duplicateDetection.similarityThresholdPercent) }}
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 5. MUSIC -->
     <div class="border-b border-zinc-800/80">
       <button
         type="button"

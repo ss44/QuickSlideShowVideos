@@ -66,6 +66,24 @@ export const SLIDE_SORT_OPTIONS: LabeledOption<SlideSortMode>[] = [
   { id: 'reverse', label: 'Reverse Order' },
 ]
 
+export interface PerceptualFingerprint {
+  /** 63-bit DCT perceptual hash split across two 32-bit unsigned integers for fast Hamming distance. */
+  hashHigh: number
+  hashLow: number
+  /** Mean sRGB channels (0–255) used alongside pHash to guard against solid-color or heavy color mismatches. */
+  avgRed: number
+  avgGreen: number
+  avgBlue: number
+}
+
+export type DuplicateMatchKind = 'exact' | 'similar'
+
+export interface DuplicateDetectionConfig {
+  enabled: boolean
+  /** 75–100: 100 matches only byte-identical files; lower values also match visually similar images. */
+  similarityThresholdPercent: number
+}
+
 export interface SlideImage {
   id: string
   file: File
@@ -77,12 +95,14 @@ export interface SlideImage {
   thumbnailUrl: string | null
   rotation: SlideRotationDegrees
   contentHash: string | null
+  perceptualFingerprint: PerceptualFingerprint | null
 }
 
 export interface DuplicateAnalysis {
   duplicateSlideIds: Set<string>
   removableDuplicateIds: Set<string>
   copyCountBySlideId: Map<string, number>
+  matchKindBySlideId: Map<string, DuplicateMatchKind>
   removableCount: number
 }
 

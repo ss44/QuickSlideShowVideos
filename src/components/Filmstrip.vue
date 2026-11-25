@@ -76,7 +76,15 @@ function isDuplicateSlide(slideId: string): boolean {
 function getSlideTooltip(slide: SlideImage): string {
   const copyCount = props.duplicateAnalysis.copyCountBySlideId.get(slide.id)
   if (!copyCount) return slide.name
-  return `${slide.name} — Duplicate image (${copyCount} copies)`
+  const matchKind = props.duplicateAnalysis.matchKindBySlideId.get(slide.id)
+  if (matchKind === 'similar') {
+    return `${slide.name} — Similar photo (${copyCount} matches)`
+  }
+  return `${slide.name} — Exact duplicate (${copyCount} copies)`
+}
+
+function getDuplicateBadgeLabel(slideId: string): string {
+  return props.duplicateAnalysis.matchKindBySlideId.get(slideId) === 'similar' ? 'Sim' : 'Dup'
 }
 
 function getSlideCardBorderClass(slide: SlideImage, slideIndex: number): string {
@@ -118,7 +126,7 @@ function getSlideCardBorderClass(slide: SlideImage, slideIndex: number): string 
           v-if="props.duplicateAnalysis.removableCount > 0"
           type="button"
           class="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/15 px-2.5 py-1 text-xs font-medium text-amber-300 transition hover:bg-amber-500/25 hover:text-amber-200"
-          :title="`Remove ${props.duplicateAnalysis.removableCount} duplicate ${props.duplicateAnalysis.removableCount === 1 ? 'photo' : 'photos'} (keeps the first copy of each)`"
+          :title="`Remove ${props.duplicateAnalysis.removableCount} duplicate ${props.duplicateAnalysis.removableCount === 1 ? 'photo' : 'photos'} (keeps the highest-resolution copy of each)`"
           @click="emit('removeDuplicates')"
         >
           <CopyMinus class="h-3.5 w-3.5" />
@@ -263,7 +271,7 @@ function getSlideCardBorderClass(slide: SlideImage, slideIndex: number): string 
           v-if="isDuplicateSlide(slide.id)"
           class="pointer-events-none absolute right-1 bottom-1 rounded bg-amber-500/90 px-1.5 py-0.5 text-[9px] font-semibold tracking-wide text-zinc-950 uppercase shadow-xs"
         >
-          Dup
+          {{ getDuplicateBadgeLabel(slide.id) }}
         </span>
 
         <!-- Drag Handle Indicator -->

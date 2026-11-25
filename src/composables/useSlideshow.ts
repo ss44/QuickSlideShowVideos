@@ -1,5 +1,6 @@
-import { computed, markRaw, reactive, ref } from 'vue'
+import { computed, markRaw, reactive, ref, watch } from 'vue'
 import type {
+  DuplicateDetectionConfig,
   MusicConfig,
   MusicSourceType,
   OutputConfig,
@@ -14,6 +15,7 @@ import type {
 import { RESOLUTION_PRESETS, TRANSITION_OPTIONS } from '../types/slideshow'
 import { thumbnailQueue } from '../engine/imageCache'
 import {
+  DEFAULT_DUPLICATE_THRESHOLD_PERCENT,
   analyzeSlideDuplicates,
   contentHashQueue,
   findSlidesRequiringHash,
@@ -44,6 +46,7 @@ function createSlideImageFromFile(file: File): SlideImage {
     thumbnailUrl: null,
     rotation: 0,
     contentHash: null,
+    perceptualFingerprint: null,
   }
 }
 
@@ -109,6 +112,11 @@ export function useSlideshow() {
     quality: 'standard',
   })
 
+  const duplicateDetection = reactive<DuplicateDetectionConfig>({
+    enabled: true,
+    similarityThresholdPercent: DEFAULT_DUPLICATE_THRESHOLD_PERCENT,
+  })
+
   const timeline = computed(() =>
     computeTimeline(
       slides.value,
@@ -128,7 +136,9 @@ export function useSlideshow() {
     findSlideIndexAtTime(timeline.value, currentTime.value),
   )
 
-  const duplicateAnalysis = computed(() => analyzeSlideDuplicates(slides.value))
+  const duplicateAnalysis = computed(() =>
+    analyzeSlideDuplicates(slides.value, duplicateDetection),
+  )
 
   function clampPlaybackStateAfterRemoval() {
     if (currentTime.value > timeline.value.totalDuration) {
@@ -141,6 +151,7 @@ export function useSlideshow() {
   }
 
   function scheduleDuplicateDetectionForSlides() {
+    if (!duplicateDetection.enabled) return
     const slidesNeedingHash = findSlidesRequiringHash(slides.value)
     for (const candidateSlide of slidesNeedingHash) {
       contentHashQueue.enqueue(candidateSlide, (contentHash) => {
@@ -152,6 +163,15 @@ export function useSlideshow() {
     }
   }
 
+  watch(
+    () => duplicateDetection.enabled,
+    (isEnabled) => {
+      if (isEnabled) {
+        scheduleDuplicateDetectionForSlides()
+      }
+    },
+  )
+
   function addFiles(inputFiles: FileList | File[]) {
     const validImageFiles = Array.from(inputFiles).filter(isImageFile)
     if (validImageFiles.length === 0) return
@@ -162,17 +182,21 @@ export function useSlideshow() {
     scheduleDuplicateDetectionForSlides()
 
     for (const slide of newSlides) {
-      thumbnailQueue.enqueue(slide, (thumbnailBlobUrl, naturalWidth, naturalHeight) => {
-        const targetSlide = slides.value.find((item) => item.id === slide.id)
-        if (targetSlide) {
-          targetSlide.thumbnailUrl = thumbnailBlobUrl
-          targetSlide.width = naturalWidth
-          targetSlide.height = naturalHeight
-        } else {
-          // Slide was removed before its asynchronous thumbnail completed
-          URL.revokeObjectURL(thumbnailBlobUrl)
-        }
-      })
+      thumbnailQueue.enqueue(
+        slide,
+        (thumbnailBlobUrl, naturalWidth, naturalHeight, perceptualFingerprint) => {
+          const targetSlide = slides.value.find((item) => item.id === slide.id)
+          if (targetSlide) {
+            targetSlide.thumbnailUrl = thumbnailBlobUrl
+            targetSlide.width = naturalWidth
+            targetSlide.height = naturalHeight
+            targetSlide.perceptualFingerprint = perceptualFingerprint
+          } else {
+            // Slide was removed before its asynchronous thumbnail completed
+            URL.revokeObjectURL(thumbnailBlobUrl)
+          }
+        },
+      )
     }
   }
 
@@ -373,6 +397,7 @@ export function useSlideshow() {
     effects,
     music,
     output,
+    duplicateDetection,
     timeline,
     estimatedSizeMB,
     activeSlideIndex,
