@@ -1,0 +1,42 @@
+<script setup lang="ts">
+import { useId } from 'vue'
+
+const gradientId = `qss-sunset-${useId()}`
+</script>
+
+<template>
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 64 64"
+    fill="none"
+    aria-hidden="true"
+  >
+    <defs>
+      <linearGradient :id="gradientId" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+        <stop offset="0%" stop-color="#f97316" />
+        <stop offset="55%" stop-color="#ec4899" />
+        <stop offset="100%" stop-color="#6366f1" />
+      </linearGradient>
+    </defs>
+    <rect width="64" height="64" rx="16" :fill="`url(#${gradientId})`" />
+    <rect
+      x="11"
+      y="13"
+      width="38"
+      height="30"
+      rx="6"
+      fill="#ffffff"
+      fill-opacity="0.22"
+      stroke="#ffffff"
+      stroke-width="2.5"
+    />
+    <circle cx="21" cy="22" r="3.5" fill="#ffffff" />
+    <path
+      d="M13.5 39L23 29.5L30.5 36.5L36 31.5L46.5 39V40.5C46.5 41.6 45.6 42.5 44.5 42.5H15.5C14.4 42.5 13.5 41.6 13.5 40.5V39Z"
+      fill="#ffffff"
+      fill-opacity="0.88"
+    />
+    <circle cx="46" cy="46" r="11" fill="#18181b" stroke="#ffffff" stroke-width="2.5" />
+    <path d="M43.5 41.5L51 46L43.5 50.5V41.5Z" fill="#ffffff" />
+  </svg>
+</template>

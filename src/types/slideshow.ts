@@ -76,6 +76,14 @@ export interface SlideImage {
   height: number
   thumbnailUrl: string | null
   rotation: SlideRotationDegrees
+  contentHash: string | null
+}
+
+export interface DuplicateAnalysis {
+  duplicateSlideIds: Set<string>
+  removableDuplicateIds: Set<string>
+  copyCountBySlideId: Map<string, number>
+  removableCount: number
 }
 
 export interface TimingConfig {

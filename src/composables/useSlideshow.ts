@@ -14,6 +14,11 @@ import type {
 import { RESOLUTION_PRESETS, TRANSITION_OPTIONS } from '../types/slideshow'
 import { thumbnailQueue } from '../engine/imageCache'
 import {
+  analyzeSlideDuplicates,
+  contentHashQueue,
+  findSlidesRequiringHash,
+} from '../engine/duplicateDetector'
+import {
   computeTimeline,
   estimateFileSizeMB,
   findSlideIndexAtTime,
@@ -38,6 +43,7 @@ function createSlideImageFromFile(file: File): SlideImage {
     height: 0,
     thumbnailUrl: null,
     rotation: 0,
+    contentHash: null,
   }
 }
 
@@ -122,12 +128,38 @@ export function useSlideshow() {
     findSlideIndexAtTime(timeline.value, currentTime.value),
   )
 
+  const duplicateAnalysis = computed(() => analyzeSlideDuplicates(slides.value))
+
+  function clampPlaybackStateAfterRemoval() {
+    if (currentTime.value > timeline.value.totalDuration) {
+      currentTime.value = Math.max(0, timeline.value.totalDuration - 0.01)
+    }
+    if (slides.value.length === 0) {
+      isPlaying.value = false
+      currentTime.value = 0
+    }
+  }
+
+  function scheduleDuplicateDetectionForSlides() {
+    const slidesNeedingHash = findSlidesRequiringHash(slides.value)
+    for (const candidateSlide of slidesNeedingHash) {
+      contentHashQueue.enqueue(candidateSlide, (contentHash) => {
+        const targetSlide = slides.value.find((item) => item.id === candidateSlide.id)
+        if (targetSlide) {
+          targetSlide.contentHash = contentHash
+        }
+      })
+    }
+  }
+
   function addFiles(inputFiles: FileList | File[]) {
     const validImageFiles = Array.from(inputFiles).filter(isImageFile)
     if (validImageFiles.length === 0) return
 
     const newSlides = validImageFiles.map(createSlideImageFromFile)
     slides.value = [...slides.value, ...newSlides]
+
+    scheduleDuplicateDetectionForSlides()
 
     for (const slide of newSlides) {
       thumbnailQueue.enqueue(slide, (thumbnailBlobUrl, naturalWidth, naturalHeight) => {
@@ -153,13 +185,24 @@ export function useSlideshow() {
     updatedSlides.splice(indexToRemove, 1)
     slides.value = updatedSlides
 
-    if (currentTime.value > timeline.value.totalDuration) {
-      currentTime.value = Math.max(0, timeline.value.totalDuration - 0.01)
+    clampPlaybackStateAfterRemoval()
+  }
+
+  function removeDuplicateSlides() {
+    const removableIds = duplicateAnalysis.value.removableDuplicateIds
+    if (removableIds.size === 0) return
+
+    const remainingSlides: SlideImage[] = []
+    for (const slide of slides.value) {
+      if (removableIds.has(slide.id)) {
+        revokeSlideThumbnail(slide)
+      } else {
+        remainingSlides.push(slide)
+      }
     }
-    if (slides.value.length === 0) {
-      isPlaying.value = false
-      currentTime.value = 0
-    }
+
+    slides.value = remainingSlides
+    clampPlaybackStateAfterRemoval()
   }
 
   function rotateSlide(slideId: string) {
@@ -206,6 +249,7 @@ export function useSlideshow() {
     isPlaying.value = false
     currentTime.value = 0
     thumbnailQueue.clear()
+    contentHashQueue.clear()
     for (const slide of slides.value) {
       revokeSlideThumbnail(slide)
     }
@@ -332,8 +376,10 @@ export function useSlideshow() {
     timeline,
     estimatedSizeMB,
     activeSlideIndex,
+    duplicateAnalysis,
     addFiles,
     removeSlide,
+    removeDuplicateSlides,
     rotateSlide,
     reorderSlides,
     sortSlides,

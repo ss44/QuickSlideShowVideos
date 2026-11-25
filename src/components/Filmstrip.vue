@@ -9,17 +9,20 @@ import {
   Maximize2,
   Minimize2,
   GripVertical,
+  CopyMinus,
 } from 'lucide-vue-next'
-import type { SlideImage, SlideSortMode } from '../types/slideshow'
+import type { DuplicateAnalysis, SlideImage, SlideSortMode } from '../types/slideshow'
 import { SLIDE_SORT_OPTIONS } from '../types/slideshow'
 
 const props = defineProps<{
   slides: SlideImage[]
   activeSlideIndex: number
+  duplicateAnalysis: DuplicateAnalysis
 }>()
 
 const emit = defineEmits<{
   (e: 'addMore'): void
+  (e: 'removeDuplicates'): void
   (e: 'jumpTo', index: number): void
   (e: 'remove', id: string): void
   (e: 'rotate', id: string): void
@@ -65,6 +68,32 @@ function applySortMode(sortMode: SlideSortMode) {
   emit('sort', sortMode)
   isSortMenuOpen.value = false
 }
+
+function isDuplicateSlide(slideId: string): boolean {
+  return props.duplicateAnalysis.duplicateSlideIds.has(slideId)
+}
+
+function getSlideTooltip(slide: SlideImage): string {
+  const copyCount = props.duplicateAnalysis.copyCountBySlideId.get(slide.id)
+  if (!copyCount) return slide.name
+  return `${slide.name} — Duplicate image (${copyCount} copies)`
+}
+
+function getSlideCardBorderClass(slide: SlideImage, slideIndex: number): string {
+  const isActive = slideIndex === props.activeSlideIndex
+  const isDuplicate = isDuplicateSlide(slide.id)
+
+  if (isDuplicate && isActive) {
+    return 'border-2 border-amber-400 ring-2 ring-indigo-500/70'
+  }
+  if (isDuplicate) {
+    return 'border-2 border-amber-400/90 ring-1 ring-amber-500/30 hover:border-amber-300'
+  }
+  if (isActive) {
+    return 'border border-indigo-500 ring-2 ring-indigo-500/40'
+  }
+  return 'border border-zinc-800 hover:border-zinc-600'
+}
 </script>
 
 <template>
@@ -85,6 +114,22 @@ function applySortMode(sortMode: SlideSortMode) {
       </div>
 
       <div class="flex items-center gap-1.5">
+        <button
+          v-if="props.duplicateAnalysis.removableCount > 0"
+          type="button"
+          class="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/15 px-2.5 py-1 text-xs font-medium text-amber-300 transition hover:bg-amber-500/25 hover:text-amber-200"
+          :title="`Remove ${props.duplicateAnalysis.removableCount} duplicate ${props.duplicateAnalysis.removableCount === 1 ? 'photo' : 'photos'} (keeps the first copy of each)`"
+          @click="emit('removeDuplicates')"
+        >
+          <CopyMinus class="h-3.5 w-3.5" />
+          <span>Remove Duplicates</span>
+          <span
+            class="rounded-full bg-amber-500/25 px-1.5 py-0.25 font-mono text-[10px] font-semibold text-amber-200"
+          >
+            {{ props.duplicateAnalysis.removableCount }}
+          </span>
+        </button>
+
         <button
           type="button"
           class="inline-flex items-center gap-1.5 rounded-md bg-zinc-800 px-2.5 py-1 text-xs font-medium text-zinc-200 transition hover:bg-zinc-700"
@@ -173,14 +218,13 @@ function applySortMode(sortMode: SlideSortMode) {
         v-for="(slide, slideIndex) in props.slides"
         :key="slide.id"
         draggable="true"
-        class="group relative shrink-0 cursor-pointer overflow-hidden rounded-lg border bg-zinc-900 transition"
+        :title="getSlideTooltip(slide)"
+        class="group relative shrink-0 cursor-pointer overflow-hidden rounded-lg bg-zinc-900 transition"
         :class="[
           isGridExpanded ? 'aspect-[4/3] w-full' : 'h-24 w-32',
-          slideIndex === props.activeSlideIndex
-            ? 'border-indigo-500 ring-2 ring-indigo-500/40'
-            : 'border-zinc-800 hover:border-zinc-600',
+          getSlideCardBorderClass(slide, slideIndex),
           dragTargetSlideIndex === slideIndex && draggedSlideIndex !== slideIndex
-            ? 'scale-[1.03] ring-2 ring-amber-400'
+            ? 'scale-[1.03] ring-2 ring-sky-400'
             : '',
           draggedSlideIndex === slideIndex ? 'opacity-40' : '',
         ]"
@@ -212,6 +256,14 @@ function applySortMode(sortMode: SlideSortMode) {
           class="absolute bottom-1 left-1 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] font-medium text-zinc-200 backdrop-blur-xs"
         >
           {{ slideIndex + 1 }}
+        </span>
+
+        <!-- Duplicate Indicator Badge -->
+        <span
+          v-if="isDuplicateSlide(slide.id)"
+          class="pointer-events-none absolute right-1 bottom-1 rounded bg-amber-500/90 px-1.5 py-0.5 text-[9px] font-semibold tracking-wide text-zinc-950 uppercase shadow-xs"
+        >
+          Dup
         </span>
 
         <!-- Drag Handle Indicator -->

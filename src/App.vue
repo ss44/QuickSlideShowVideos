@@ -6,6 +6,7 @@ import SettingsSidebar from './components/SettingsSidebar.vue'
 import Filmstrip from './components/Filmstrip.vue'
 import ExportModal from './components/ExportModal.vue'
 import { useSlideshow } from './composables/useSlideshow'
+import { usePwaInstall } from './composables/usePwaInstall'
 import { exportSlideshowVideo } from './engine/exporter'
 import type { ExportProgress } from './types/slideshow'
 
@@ -23,8 +24,10 @@ const {
   timeline,
   estimatedSizeMB,
   activeSlideIndex,
+  duplicateAnalysis,
   addFiles,
   removeSlide,
+  removeDuplicateSlides,
   rotateSlide,
   reorderSlides,
   sortSlides,
@@ -37,6 +40,14 @@ const {
   setResolutionPreset,
   jumpToSlide,
 } = useSlideshow()
+
+const {
+  canOfferInstall,
+  isInstalling,
+  isIosInstructionsOpen,
+  promptInstall,
+  closeIosInstructions,
+} = usePwaInstall()
 
 const previewStageRef = ref<InstanceType<typeof PreviewStage> | null>(null)
 const isExportModalOpen = ref(false)
@@ -170,7 +181,12 @@ onBeforeUnmount(() => {
       :output="output"
       :can-export="slides.length > 0"
       :beat-snapped="timeline.beatSnapped"
+      :can-offer-install="canOfferInstall"
+      :is-installing="isInstalling"
+      :is-ios-instructions-open="isIosInstructionsOpen"
       @export="startExport"
+      @install="promptInstall"
+      @close-ios-instructions="closeIosInstructions"
     />
 
     <div class="flex min-h-0 flex-1 flex-col lg:flex-row">
@@ -196,7 +212,9 @@ onBeforeUnmount(() => {
         <Filmstrip
           :slides="slides"
           :active-slide-index="activeSlideIndex"
+          :duplicate-analysis="duplicateAnalysis"
           @add-more="previewStageRef?.openFilePicker()"
+          @remove-duplicates="removeDuplicateSlides"
           @jump-to="jumpToSlide"
           @remove="removeSlide"
           @rotate="rotateSlide"
