@@ -41,3 +41,12 @@ All significant architectural decisions for QuickSlideShowVideos are tracked her
 
 - **Decision:** `computeTimeline()` in `src/engine/timeline.ts` is a pure function with a deterministic seeded PRNG (`seededRandom`) for `'random'` transition order and Ken Burns motion direction (`kenBurnsSeed`).
 - **Rationale:** Ensures scrubbing back and forth in preview and exporting the final MP4 always produce identical transition choices and camera motions.
+
+## ADR-007: SOLID Architecture, DRY Abstractions & Self-Documenting Code Standards
+
+- **Decision:** Enforce SOLID design principles, contextual unit-explicit variable and function naming, shared cross-engine helpers, and explanatory comments on non-intuitive math/browser constraints.
+- **Key Abstractions:**
+  - **Open/Closed Strategy Registries:** Transitions (`TRANSITION_COMPOSERS`) and Color Looks (`COLOR_LOOK_FILTERS`) in `src/engine/renderer.ts` use declarative strategy tables rather than monolithic conditional branches.
+  - **Dependency Inversion for Muxing:** `MediaContainerMuxer` in `src/engine/exporter.ts` abstracts `Mp4Muxer` and `WebmMuxer` behind a single interface so encoding loops are container-agnostic.
+  - **Shared Engine Utilities:** Binary timeline lookup (`findSlideIndexAtTime`), sliding-window bitmap preloading (`BitmapCache.ensureSlideWindowLoaded`), audio loop/fade envelope scheduling (`scheduleAudioFadeEnvelope`), and display formatters (`src/utils/formatters.ts`) are centralized in single locations.
+- **Rationale:** Keeps the codebase easy to read, reason about, and extend without regression risk between live preview and offline export.

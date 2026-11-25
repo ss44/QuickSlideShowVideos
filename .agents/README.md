@@ -8,22 +8,24 @@ QuickSlideShowVideos is a **100% browser-based slideshow video editor** built wi
 2. **WYSIWYG Parity**: Preview (`src/components/PreviewStage.vue`) and Export (`src/engine/exporter.ts`) **must** share `SlideshowRenderer` (`src/engine/renderer.ts`) and `computeTimeline` (`src/engine/timeline.ts`). Never duplicate rendering math.
 3. **Hundreds-of-Photos Memory Safety**: Never decode all images eagerly or store full-resolution `ImageBitmap` / data URLs in Vue reactive state. Always use `thumbnailQueue` for UI thumbnails and `BitmapCache` (LRU with `.close()` on eviction) for rendering.
 4. **Simplicity First**: Keep the interface single-screen, uncluttered, and immediately understandable. Avoid adding heavy timeline tracks or NLE complexity unless explicitly requested.
+5. **SOLID & Self-Reading Code**: Follow Single Responsibility and Open/Closed patterns, use contextual self-documenting variable/method names (with units where helpful), abstract redundant logic into shared helpers, and comment non-intuitive math or browser API constraints. See [`code-quality-and-solid`](./skills/code-quality-and-solid/SKILL.md).
 
 ## Architecture Map
 
 ```
 src/
 ├── types/slideshow.ts        # All shared domain types, transition & preset registries
+├── utils/
+│   ├── fileDrop.ts           # Drag-and-drop image + nested folder extraction
+│   └── formatters.ts         # Shared clock duration & file-size formatters
 ├── engine/
-│   ├── imageCache.ts         # Concurrency-limited thumbnail queue + LRU ImageBitmap cache
-│   ├── timeline.ts           # Deterministic slide timing, Match Music Length, Beat Sync, size estimate
-│   ├── audioEngine.ts        # Audio decode (File + CORS URL), beat detection, preview & offline mix
-│   ├── renderer.ts           # Shared Canvas 2D renderer (11 transitions, Ken Burns, blur-fill, looks)
-│   └── exporter.ts           # WebCodecs (VideoEncoder + AudioEncoder) + mp4-muxer / webm-muxer
+│   ├── imageCache.ts         # Concurrency-limited thumbnail queue + LRU ImageBitmap cache & window preloader
+│   ├── timeline.ts           # Deterministic slide timing, beat snapping, O(log N) lookup, size estimate
+│   ├── audioEngine.ts        # Audio decode (File + CORS URL), beat detection, shared fade envelope, preview & offline mix
+│   ├── renderer.ts           # Shared Canvas 2D renderer (Open/Closed transition map, Ken Burns, blur-fill, looks)
+│   └── exporter.ts           # WebCodecs encoder + unified MediaContainerMuxer adapter (MP4 & WebM)
 ├── composables/
 │   └── useSlideshow.ts       # Central reactive state & actions (uses markRaw for AudioBuffer)
-├── utils/
-│   └── fileDrop.ts           # Drag-and-drop image + nested folder extraction
 └── components/
     ├── TopBar.vue            # Live estimates (count, duration, size) & Export CTA
     ├── PreviewStage.vue      # Empty drop zone + real-time synced canvas preview player
@@ -47,6 +49,7 @@ mise exec node -- npm run preview   # Serve production dist/
 
 - Read [DECISIONS.md](./DECISIONS.md) before changing core tech choices or architecture.
 - Load the relevant skill under `.agents/skills/` before modifying a subsystem:
+  - [`code-quality-and-solid`](./skills/code-quality-and-solid/SKILL.md) — SOLID principles, contextual naming, DRY abstractions, and commenting rules.
   - [`slideshow-renderer`](./skills/slideshow-renderer/SKILL.md) — Transitions, Ken Burns, framing, color looks, WYSIWYG rules.
   - [`webcodecs-export`](./skills/webcodecs-export/SKILL.md) — MP4/WebM encoding, codec probing, audio muxing, backpressure.
   - [`large-photo-performance`](./skills/large-photo-performance/SKILL.md) — Memory management for 100–500+ images.
