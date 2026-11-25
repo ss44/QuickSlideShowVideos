@@ -39,6 +39,7 @@ import {
   formatSimilarityThresholdLabel,
 } from '../engine/duplicateDetector'
 import { formatTime } from '../utils/formatters'
+import AboutSection from './AboutSection.vue'
 
 const props = defineProps<{
   timing: TimingConfig
@@ -70,6 +71,7 @@ const openSections = ref<Record<string, boolean>>({
   music: false,
   duplicates: false,
   output: false,
+  about: false,
 })
 
 const musicUrlInput = ref('')
@@ -592,7 +594,7 @@ function submitMusicUrl() {
     </div>
 
     <!-- 6. OUTPUT -->
-    <div>
+    <div class="border-b border-zinc-800/80">
       <button
         type="button"
         class="flex w-full items-center justify-between px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-zinc-300 hover:bg-zinc-900/50"
@@ -699,5 +701,8 @@ function submitMusicUrl() {
         </div>
       </div>
     </div>
+
+    <!-- 7. ABOUT -->
+    <AboutSection :is-open="openSections.about" @toggle="toggleSection('about')" />
   </aside>
 </template>
