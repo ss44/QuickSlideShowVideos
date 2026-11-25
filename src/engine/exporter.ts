@@ -13,6 +13,11 @@ import { BitmapCache } from './imageCache'
 import { SlideshowRenderer } from './renderer'
 import { getVideoBitrate } from './timeline'
 import { renderExportAudioBuffer } from './audioEngine'
+import {
+  createMonotonicTimestampNormalizer,
+  resolveVideoChunkSchedule,
+  type BufferedVideoChunk,
+} from './videoChunkTimestamps'
 
 const EXPORT_AUDIO_SAMPLE_RATE_HZ = 48000
 const EXPORT_AUDIO_BITRATE_BPS = 160_000
@@ -36,8 +41,20 @@ interface AudioCodecSelection {
  * Decouples the WebCodecs audio/video encoding loops from container-specific (`Mp4Muxer` vs `WebmMuxer`) APIs.
  */
 interface MediaContainerMuxer {
-  addVideoChunk(chunk: EncodedVideoChunk, meta?: EncodedVideoChunkMetadata): void
-  addAudioChunk(chunk: EncodedAudioChunk, meta?: EncodedAudioChunkMetadata): void
+  addVideoChunkRaw(params: {
+    data: Uint8Array
+    type: 'key' | 'delta'
+    presentationTimestampMicroseconds: number
+    decodeTimestampMicroseconds: number
+    durationMicroseconds: number
+    compositionTimeOffsetMicroseconds: number
+    meta?: EncodedVideoChunkMetadata
+  }): void
+  addAudioChunk(
+    chunk: EncodedAudioChunk,
+    meta: EncodedAudioChunkMetadata | undefined,
+    timestampMicroseconds: number,
+  ): void
   finalizeToBlob(): Blob
 }
 
@@ -51,8 +68,9 @@ function yieldToMainThread(delayMs = 0): Promise<void> {
 
 /**
  * Probes `VideoEncoder.isConfigSupported()` to pick the highest-quality supported codec profile.
- * Configured with `latencyMode: 'realtime'` to disable out-of-order B-frame reordering,
- * which is required by `mp4-muxer` for monotonically increasing chunk timestamps.
+ * Requests `latencyMode: 'realtime'` to minimize B-frame reordering when the encoder supports it;
+ * if an encoder still emits B-frames in decode order, `resolveVideoChunkSchedule()` reconstructs
+ * monotonic DTS and MP4 `ctts` composition offsets during muxing.
  */
 async function selectSupportedVideoCodec(
   format: OutputFormat,
@@ -166,8 +184,34 @@ function createContainerMuxer(params: {
     })
 
     return {
-      addVideoChunk: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
-      addAudioChunk: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
+      addVideoChunkRaw: ({
+        data,
+        type,
+        presentationTimestampMicroseconds,
+        durationMicroseconds,
+        compositionTimeOffsetMicroseconds,
+        meta,
+      }) => {
+        muxer.addVideoChunkRaw(
+          data,
+          type,
+          presentationTimestampMicroseconds,
+          durationMicroseconds,
+          meta,
+          compositionTimeOffsetMicroseconds,
+        )
+      },
+      addAudioChunk: (chunk, meta, timestampMicroseconds) => {
+        const audioData = new Uint8Array(chunk.byteLength)
+        chunk.copyTo(audioData)
+        muxer.addAudioChunkRaw(
+          audioData,
+          chunk.type,
+          timestampMicroseconds,
+          chunk.duration ?? 0,
+          meta,
+        )
+      },
       finalizeToBlob: () => {
         muxer.finalize()
         return new Blob([target.buffer], { type: 'video/mp4' })
@@ -196,8 +240,13 @@ function createContainerMuxer(params: {
   })
 
   return {
-    addVideoChunk: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
-    addAudioChunk: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
+    addVideoChunkRaw: ({ data, type, decodeTimestampMicroseconds, meta }) => {
+      // WebM does not use MP4 `ctts` boxes; passing the monotonic decode timestamp guarantees
+      // chunks stay in decode order without failing `webm-muxer`'s monotonicity check.
+      muxer.addVideoChunkRaw(data, type, decodeTimestampMicroseconds, meta)
+    },
+    addAudioChunk: (chunk, meta, timestampMicroseconds) =>
+      muxer.addAudioChunk(chunk, meta, timestampMicroseconds),
     finalizeToBlob: () => {
       muxer.finalize()
       return new Blob([target.buffer], { type: 'video/webm' })
@@ -233,11 +282,13 @@ async function encodeAudioTrackToMuxer(params: {
 }): Promise<void> {
   const { renderedAudio, audioCodec, containerMuxer, signal } = params
   let encoderError: Error | null = null
+  const normalizeAudioTimestamp = createMonotonicTimestampNormalizer()
 
   const audioEncoder = new AudioEncoder({
     output: (chunk, meta) => {
       try {
-        containerMuxer.addAudioChunk(chunk, meta)
+        const normalizedTimestampMicroseconds = normalizeAudioTimestamp(chunk.timestamp)
+        containerMuxer.addAudioChunk(chunk, meta, normalizedTimestampMicroseconds)
       } catch (err) {
         encoderError = err instanceof Error ? err : new Error(String(err))
       }
@@ -351,11 +402,32 @@ async function encodeVideoFramesToMuxer(params: {
   } = params
 
   let encoderError: Error | null = null
+  const frameDurationMicroseconds = Math.round(1_000_000 / output.fps)
+  const keyFrameIntervalFrames = output.fps * 2 // Insert an IDR keyframe every 2 seconds
+
+  // Buffer encoded video chunks in decode order until `videoEncoder.flush()` completes so we
+  // can reconstruct monotonic DTS and non-negative MP4 `ctts` offsets if the encoder emits
+  // B-frames. `Mp4Muxer` (`fastStart: 'in-memory'`) already retains all sample buffers until
+  // `finalize()`, and `addVideoChunkRaw` takes `Uint8Array` by reference (zero extra copy).
+  const bufferedVideoChunks: BufferedVideoChunk[] = []
 
   const videoEncoder = new VideoEncoder({
     output: (chunk, meta) => {
       try {
-        containerMuxer.addVideoChunk(chunk, meta)
+        const data = new Uint8Array(chunk.byteLength)
+        chunk.copyTo(data)
+        const durationMicroseconds =
+          chunk.duration !== null && Number.isFinite(chunk.duration) && chunk.duration >= 0
+            ? chunk.duration
+            : frameDurationMicroseconds
+
+        bufferedVideoChunks.push({
+          data,
+          type: chunk.type,
+          presentationTimestampMicroseconds: chunk.timestamp,
+          durationMicroseconds,
+          meta,
+        })
       } catch (err) {
         encoderError = err instanceof Error ? err : new Error(String(err))
       }
@@ -381,9 +453,6 @@ async function encodeVideoFramesToMuxer(params: {
   const renderCtx = renderCanvas.getContext('2d', { alpha: false })!
   const renderer = new SlideshowRenderer()
   const exportBitmapCache = new BitmapCache(6, Math.max(width, height))
-
-  const frameDurationMicroseconds = Math.round(1_000_000 / output.fps)
-  const keyFrameIntervalFrames = output.fps * 2 // Insert an IDR keyframe every 2 seconds
 
   try {
     let lastProgressReportTimeMs = 0
@@ -473,8 +542,27 @@ async function encodeVideoFramesToMuxer(params: {
     })
 
     await videoEncoder.flush()
+    if (signal.aborted) {
+      throw new DOMException('Cancelled', 'AbortError')
+    }
     if (encoderError) throw encoderError
+
+    const chunkSchedule = resolveVideoChunkSchedule(bufferedVideoChunks)
+    for (let index = 0; index < bufferedVideoChunks.length; index++) {
+      const chunk = bufferedVideoChunks[index]
+      const timing = chunkSchedule.timings[index]
+      containerMuxer.addVideoChunkRaw({
+        data: chunk.data,
+        type: chunk.type,
+        presentationTimestampMicroseconds: timing.presentationTimestampMicroseconds,
+        decodeTimestampMicroseconds: timing.decodeTimestampMicroseconds,
+        durationMicroseconds: chunk.durationMicroseconds,
+        compositionTimeOffsetMicroseconds: timing.compositionTimeOffsetMicroseconds,
+        meta: chunk.meta,
+      })
+    }
   } finally {
+    bufferedVideoChunks.length = 0
     exportBitmapCache.clear()
     try {
       if (videoEncoder.state !== 'closed') videoEncoder.close()

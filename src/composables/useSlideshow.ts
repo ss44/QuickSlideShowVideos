@@ -12,10 +12,18 @@ import type {
   TransitionOrderMode,
   TransitionType,
 } from '../types/slideshow'
+import type {
+  ProjectSavePayload,
+  RestoredProjectData,
+  SavedMusicRecord,
+  SavedProjectSettings,
+} from '../types/project'
 import { RESOLUTION_PRESETS, TRANSITION_OPTIONS } from '../types/slideshow'
 import { thumbnailQueue } from '../engine/imageCache'
 import {
   DEFAULT_DUPLICATE_THRESHOLD_PERCENT,
+  DUPLICATE_THRESHOLD_MAX_PERCENT,
+  DUPLICATE_THRESHOLD_MIN_PERCENT,
   analyzeSlideDuplicates,
   contentHashQueue,
   findSlidesRequiringHash,
@@ -25,14 +33,27 @@ import {
   estimateFileSizeMB,
   findSlideIndexAtTime,
 } from '../engine/timeline'
-import { decodeAudioFromFile, decodeAudioFromUrl, detectBeats } from '../engine/audioEngine'
+import {
+  decodeAudioFromFile,
+  detectBeats,
+  fetchAndDecodeAudioFromUrl,
+} from '../engine/audioEngine'
 import { isImageFile } from '../utils/fileDrop'
 
 let slideIdSequence = 1
+let musicAssetIdSequence = 1
 
 function generateUniqueSlideId(): string {
   return `slide-${Date.now().toString(36)}-${slideIdSequence++}`
 }
+
+function generateUniqueMusicAssetId(): string {
+  return `music-${Date.now().toString(36)}-${musicAssetIdSequence++}`
+}
+
+const VALID_TRANSITION_IDS = new Set<TransitionType>(
+  TRANSITION_OPTIONS.map((option) => option.id),
+)
 
 function createSlideImageFromFile(file: File): SlideImage {
   return {
@@ -172,16 +193,8 @@ export function useSlideshow() {
     },
   )
 
-  function addFiles(inputFiles: FileList | File[]) {
-    const validImageFiles = Array.from(inputFiles).filter(isImageFile)
-    if (validImageFiles.length === 0) return
-
-    const newSlides = validImageFiles.map(createSlideImageFromFile)
-    slides.value = [...slides.value, ...newSlides]
-
-    scheduleDuplicateDetectionForSlides()
-
-    for (const slide of newSlides) {
+  function enqueueThumbnailsForSlides(targetSlides: SlideImage[]) {
+    for (const slide of targetSlides) {
       thumbnailQueue.enqueue(
         slide,
         (thumbnailBlobUrl, naturalWidth, naturalHeight, perceptualFingerprint) => {
@@ -190,7 +203,9 @@ export function useSlideshow() {
             targetSlide.thumbnailUrl = thumbnailBlobUrl
             targetSlide.width = naturalWidth
             targetSlide.height = naturalHeight
-            targetSlide.perceptualFingerprint = perceptualFingerprint
+            if (perceptualFingerprint) {
+              targetSlide.perceptualFingerprint = perceptualFingerprint
+            }
           } else {
             // Slide was removed before its asynchronous thumbnail completed
             URL.revokeObjectURL(thumbnailBlobUrl)
@@ -198,6 +213,17 @@ export function useSlideshow() {
         },
       )
     }
+  }
+
+  function addFiles(inputFiles: FileList | File[]) {
+    const validImageFiles = Array.from(inputFiles).filter(isImageFile)
+    if (validImageFiles.length === 0) return
+
+    const newSlides = validImageFiles.map(createSlideImageFromFile)
+    slides.value = [...slides.value, ...newSlides]
+
+    scheduleDuplicateDetectionForSlides()
+    enqueueThumbnailsForSlides(newSlides)
   }
 
   function removeSlide(slideId: string) {
@@ -302,19 +328,37 @@ export function useSlideshow() {
     selectedTransitions.value = [transitionType]
   }
 
+  // Kept outside reactive state so Vue never proxies raw binary Blob internals
+  let musicSourceBlob: Blob | null = null
+  let musicAssetId: string | null = null
+
   function applyLoadedAudioBuffer(
     buffer: AudioBuffer,
     sourceType: Exclude<MusicSourceType, 'none'>,
     trackName: string,
     sourceUrl: string,
+    sourceBlob: Blob | null,
+    options?: {
+      assetId?: string | null
+      preserveStartOffset?: number
+      existingBeatTimes?: number[]
+    },
   ) {
     music.audioBuffer = markRaw(buffer)
     music.sourceType = sourceType
     music.name = trackName
     music.url = sourceUrl
     music.duration = buffer.duration
-    music.startOffset = 0
-    music.beatTimes = detectBeats(buffer)
+    music.startOffset =
+      options?.preserveStartOffset !== undefined
+        ? Math.min(Math.max(0, options.preserveStartOffset), Math.max(0, buffer.duration - 0.5))
+        : 0
+    music.beatTimes =
+      options?.existingBeatTimes && options.existingBeatTimes.length > 0
+        ? [...options.existingBeatTimes]
+        : detectBeats(buffer)
+    musicSourceBlob = sourceBlob
+    musicAssetId = options?.assetId ?? generateUniqueMusicAssetId()
   }
 
   async function loadMusicFile(file: File) {
@@ -322,7 +366,7 @@ export function useSlideshow() {
     music.error = null
     try {
       const decodedBuffer = await decodeAudioFromFile(file)
-      applyLoadedAudioBuffer(decodedBuffer, 'file', file.name, '')
+      applyLoadedAudioBuffer(decodedBuffer, 'file', file.name, '', file)
     } catch (err) {
       music.error =
         err instanceof Error
@@ -340,12 +384,13 @@ export function useSlideshow() {
     music.loading = true
     music.error = null
     try {
-      const decodedBuffer = await decodeAudioFromUrl(trimmedUrl)
+      const { buffer: decodedBuffer, audioBlob } = await fetchAndDecodeAudioFromUrl(trimmedUrl)
       applyLoadedAudioBuffer(
         decodedBuffer,
         'url',
         extractTrackNameFromUrl(trimmedUrl),
         trimmedUrl,
+        audioBlob,
       )
     } catch (err) {
       music.error = err instanceof Error ? err.message : 'Could not load audio from URL.'
@@ -354,7 +399,7 @@ export function useSlideshow() {
     }
   }
 
-  function clearMusic() {
+  function resetMusicState() {
     music.audioBuffer = null
     music.sourceType = 'none'
     music.name = ''
@@ -363,6 +408,13 @@ export function useSlideshow() {
     music.startOffset = 0
     music.beatTimes = []
     music.error = null
+    music.loading = false
+    musicSourceBlob = null
+    musicAssetId = null
+  }
+
+  function clearMusic() {
+    resetMusicState()
     timing.matchMusicLength = false
     effects.beatSync = false
   }
@@ -384,6 +436,176 @@ export function useSlideshow() {
       timelineSlide.duration * 0.4,
     )
     currentTime.value = timelineSlide.startTime + postTransitionOffset
+  }
+
+  function captureProjectSnapshot(name: string, projectId?: string): ProjectSavePayload {
+    const settings: SavedProjectSettings = {
+      timing: { ...timing },
+      selectedTransitions: [...selectedTransitions.value],
+      transitionOrder: transitionOrder.value,
+      effects: { ...effects },
+      output: { ...output },
+      duplicateDetection: { ...duplicateDetection },
+    }
+
+    const savedMusic: SavedMusicRecord = {
+      sourceType: music.sourceType,
+      assetId: music.sourceType !== 'none' ? musicAssetId : null,
+      name: music.name,
+      url: music.url,
+      mimeType: musicSourceBlob?.type || 'audio/mpeg',
+      duration: music.duration,
+      loop: music.loop,
+      fadeIn: music.fadeIn,
+      fadeOut: music.fadeOut,
+      startOffset: music.startOffset,
+      volume: music.volume,
+      beatTimes: [...music.beatTimes],
+    }
+
+    return {
+      projectId,
+      name,
+      slides: slides.value,
+      music: savedMusic,
+      musicSourceBlob: music.sourceType !== 'none' ? musicSourceBlob : null,
+      settings,
+      totalDurationSeconds: timeline.value.totalDuration,
+    }
+  }
+
+  async function restoreProject(restored: RestoredProjectData): Promise<void> {
+    clearAllSlides()
+    resetMusicState()
+
+    const { settings } = restored
+
+    timing.slideDuration = Math.min(10, Math.max(0.5, settings.timing.slideDuration || 3.0))
+    timing.transitionDuration = Math.min(
+      2.5,
+      Math.max(0.1, settings.timing.transitionDuration || 0.7),
+    )
+    timing.matchMusicLength = Boolean(settings.timing.matchMusicLength)
+
+    const sanitizedTransitions = (settings.selectedTransitions || []).filter((transition) =>
+      VALID_TRANSITION_IDS.has(transition),
+    )
+    selectedTransitions.value =
+      sanitizedTransitions.length > 0 ? sanitizedTransitions : ['crossfade']
+    transitionOrder.value = settings.transitionOrder === 'random' ? 'random' : 'cycle'
+
+    effects.kenBurns = Boolean(settings.effects.kenBurns)
+    effects.kenBurnsIntensity = Math.min(
+      0.18,
+      Math.max(0.03, settings.effects.kenBurnsIntensity || 0.08),
+    )
+    effects.fitMode = settings.effects.fitMode || 'blur-fill'
+    effects.beatSync = Boolean(settings.effects.beatSync)
+    effects.colorLook = settings.effects.colorLook || 'none'
+    effects.vignette = Boolean(settings.effects.vignette)
+
+    output.format = settings.output.format === 'webm' ? 'webm' : 'mp4'
+    const matchedPreset = RESOLUTION_PRESETS.find((preset) => preset.id === settings.output.presetId)
+    if (matchedPreset) {
+      output.presetId = matchedPreset.id
+      output.width = matchedPreset.width
+      output.height = matchedPreset.height
+    } else {
+      output.presetId = settings.output.presetId || '1080p'
+      output.width = settings.output.width || 1920
+      output.height = settings.output.height || 1080
+    }
+    output.fps = settings.output.fps === 60 ? 60 : 30
+    output.quality = settings.output.quality === 'high' ? 'high' : 'standard'
+
+    duplicateDetection.enabled = Boolean(settings.duplicateDetection.enabled)
+    duplicateDetection.similarityThresholdPercent = Math.min(
+      DUPLICATE_THRESHOLD_MAX_PERCENT,
+      Math.max(
+        DUPLICATE_THRESHOLD_MIN_PERCENT,
+        Math.round(
+          settings.duplicateDetection.similarityThresholdPercent ??
+            DEFAULT_DUPLICATE_THRESHOLD_PERCENT,
+        ),
+      ),
+    )
+
+    const restoredSlides: SlideImage[] = restored.slides.map(({ record, file }) => ({
+      id: record.id,
+      file,
+      name: record.name,
+      size: record.size || file.size,
+      lastModified: record.lastModified || file.lastModified,
+      width: record.width || 0,
+      height: record.height || 0,
+      thumbnailUrl: null,
+      rotation: record.rotation || 0,
+      contentHash: record.contentHash ?? null,
+      perceptualFingerprint: record.perceptualFingerprint ?? null,
+    }))
+
+    slides.value = restoredSlides
+    enqueueThumbnailsForSlides(restoredSlides)
+    scheduleDuplicateDetectionForSlides()
+
+    const savedMusic = restored.music.record
+    if (savedMusic.sourceType !== 'none') {
+      music.loop = Boolean(savedMusic.loop)
+      music.fadeIn = Boolean(savedMusic.fadeIn)
+      music.fadeOut = Boolean(savedMusic.fadeOut)
+      music.volume = Math.min(1, Math.max(0, savedMusic.volume ?? 0.85))
+      music.loading = true
+      music.error = null
+
+      try {
+        if (restored.music.sourceBlob) {
+          const decodedBuffer = await decodeAudioFromFile(restored.music.sourceBlob)
+          applyLoadedAudioBuffer(
+            decodedBuffer,
+            savedMusic.sourceType,
+            savedMusic.name,
+            savedMusic.url,
+            restored.music.sourceBlob,
+            {
+              assetId: savedMusic.assetId,
+              preserveStartOffset: savedMusic.startOffset,
+              existingBeatTimes: savedMusic.beatTimes,
+            },
+          )
+        } else if (savedMusic.sourceType === 'url' && savedMusic.url) {
+          const { buffer: decodedBuffer, audioBlob } = await fetchAndDecodeAudioFromUrl(
+            savedMusic.url,
+          )
+          applyLoadedAudioBuffer(
+            decodedBuffer,
+            'url',
+            savedMusic.name || extractTrackNameFromUrl(savedMusic.url),
+            savedMusic.url,
+            audioBlob,
+            {
+              assetId: savedMusic.assetId,
+              preserveStartOffset: savedMusic.startOffset,
+              existingBeatTimes: savedMusic.beatTimes,
+            },
+          )
+        } else {
+          timing.matchMusicLength = false
+          effects.beatSync = false
+        }
+      } catch (err) {
+        timing.matchMusicLength = false
+        effects.beatSync = false
+        music.error =
+          err instanceof Error
+            ? `Saved music could not be restored: ${err.message}`
+            : 'Saved music track could not be restored.'
+      } finally {
+        music.loading = false
+      }
+    } else {
+      timing.matchMusicLength = false
+      effects.beatSync = false
+    }
   }
 
   return {
@@ -417,5 +639,7 @@ export function useSlideshow() {
     clearMusic,
     setResolutionPreset,
     jumpToSlide,
+    captureProjectSnapshot,
+    restoreProject,
   }
 }

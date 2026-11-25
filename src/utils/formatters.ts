@@ -41,3 +41,41 @@ export function formatBytesToMB(sizeBytes: number | undefined): string {
   const megabytes = sizeBytes / (1024 * 1024)
   return `${megabytes.toFixed(1)} MB`
 }
+
+/**
+ * Formats any byte count into KB, MB, or GB for storage indicators and project cards.
+ */
+export function formatBytesReadable(sizeBytes: number): string {
+  if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) return '0 KB'
+  const kilobytes = sizeBytes / 1024
+  if (kilobytes < 1024) {
+    return `${Math.max(1, Math.round(kilobytes))} KB`
+  }
+  const megabytes = kilobytes / 1024
+  if (megabytes < 1024) {
+    return `${megabytes < 10 ? megabytes.toFixed(1) : Math.round(megabytes)} MB`
+  }
+  const gigabytes = megabytes / 1024
+  return `${gigabytes.toFixed(2)} GB`
+}
+
+/**
+ * Formats an epoch timestamp in milliseconds as a concise relative label or calendar date.
+ */
+export function formatRelativeTimestamp(timestampMs: number): string {
+  if (!Number.isFinite(timestampMs) || timestampMs <= 0) return ''
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - timestampMs) / 1000))
+  if (elapsedSeconds < 45) return 'Just now'
+  const elapsedMinutes = Math.floor(elapsedSeconds / 60)
+  if (elapsedMinutes < 60) return `${elapsedMinutes}m ago`
+  const elapsedHours = Math.floor(elapsedMinutes / 60)
+  if (elapsedHours < 24) return `${elapsedHours}h ago`
+  const elapsedDays = Math.floor(elapsedHours / 24)
+  if (elapsedDays < 7) return `${elapsedDays}d ago`
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: new Date(timestampMs).getFullYear() === new Date().getFullYear() ? undefined : 'numeric',
+  }).format(new Date(timestampMs))
+}

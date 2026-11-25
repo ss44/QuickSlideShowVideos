@@ -10,6 +10,8 @@ import {
   Upload,
   FolderOpen,
   Sparkles,
+  Images,
+  Loader2,
 } from 'lucide-vue-next'
 import type {
   ComputedTimeline,
@@ -18,11 +20,12 @@ import type {
   SlideImage,
   SmartEffectsConfig,
 } from '../types/slideshow'
+import type { SavedProjectSummary } from '../types/project'
 import { BitmapCache } from '../engine/imageCache'
 import { SlideshowRenderer } from '../engine/renderer'
 import { PreviewAudioPlayer } from '../engine/audioEngine'
 import { findSlideIndexAtTime } from '../engine/timeline'
-import { formatTime } from '../utils/formatters'
+import { formatRelativeTimestamp, formatTime } from '../utils/formatters'
 import { extractImagesFromDrop } from '../utils/fileDrop'
 
 const PREVIEW_MAX_RENDER_DIMENSION_PX = 960
@@ -38,6 +41,8 @@ const props = defineProps<{
   isPlaying: boolean
   isMuted: boolean
   activeSlideIndex: number
+  savedProjects: SavedProjectSummary[]
+  openingProjectId: string | null
 }>()
 
 const emit = defineEmits<{
@@ -45,6 +50,8 @@ const emit = defineEmits<{
   (e: 'update:isPlaying', playing: boolean): void
   (e: 'update:isMuted', muted: boolean): void
   (e: 'addFiles', files: File[]): void
+  (e: 'openSavedProject', projectId: string): void
+  (e: 'openProjectsModal'): void
 }>()
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
@@ -287,6 +294,10 @@ function openFolderPicker() {
   folderInputRef.value?.click()
 }
 
+function clearBitmapCache() {
+  bitmapCache.clear()
+}
+
 onMounted(() => {
   void renderFrameAtTime(props.currentTime)
 })
@@ -296,7 +307,7 @@ onBeforeUnmount(() => {
   bitmapCache.clear()
 })
 
-defineExpose({ openFilePicker })
+defineExpose({ openFilePicker, clearBitmapCache })
 </script>
 
 <template>
@@ -368,6 +379,59 @@ defineExpose({ openFilePicker })
       <div class="mt-6 flex items-center gap-1.5 text-xs text-zinc-500">
         <Sparkles class="h-3.5 w-3.5 text-indigo-400" />
         <span>Supports JPG, PNG, WebP, AVIF · Instant preview · Direct MP4 export</span>
+      </div>
+
+      <!-- Recent Saved Projects Quick-Reopen Strip -->
+      <div
+        v-if="props.savedProjects.length > 0"
+        class="mt-6 w-full border-t border-zinc-800/80 pt-5 text-left"
+      >
+        <div class="mb-2.5 flex items-center justify-between text-xs">
+          <span class="font-medium text-zinc-300">Recent Saved Projects</span>
+          <button
+            type="button"
+            class="text-indigo-400 transition hover:text-indigo-300"
+            @click="emit('openProjectsModal')"
+          >
+            Manage all ({{ props.savedProjects.length }})
+          </button>
+        </div>
+
+        <div class="grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <button
+            v-for="project in props.savedProjects.slice(0, 3)"
+            :key="project.id"
+            type="button"
+            :disabled="props.openingProjectId !== null"
+            class="group flex items-center gap-2.5 rounded-xl border border-zinc-800 bg-zinc-900/70 p-2 text-left transition hover:border-indigo-500/60 hover:bg-zinc-900 disabled:opacity-60"
+            @click="emit('openSavedProject', project.id)"
+          >
+            <div
+              class="flex h-10 w-12 shrink-0 items-center justify-center overflow-hidden rounded-md border border-zinc-800 bg-zinc-950"
+            >
+              <Loader2
+                v-if="props.openingProjectId === project.id"
+                class="h-4 w-4 animate-spin text-indigo-400"
+              />
+              <img
+                v-else-if="project.coverThumbnailUrl"
+                :src="project.coverThumbnailUrl"
+                :alt="project.name"
+                class="h-full w-full object-cover"
+              />
+              <Images v-else class="h-4 w-4 text-zinc-600" />
+            </div>
+            <div class="min-w-0 flex-1">
+              <div class="truncate text-xs font-medium text-zinc-100 group-hover:text-indigo-200">
+                {{ project.name }}
+              </div>
+              <div class="mt-0.5 truncate text-[10px] text-zinc-500">
+                {{ project.slideCount }} {{ project.slideCount === 1 ? 'photo' : 'photos' }} ·
+                {{ formatRelativeTimestamp(project.updatedAt) }}
+              </div>
+            </div>
+          </button>
+        </div>
       </div>
     </div>
 

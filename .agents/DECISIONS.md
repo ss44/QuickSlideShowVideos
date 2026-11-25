@@ -50,3 +50,12 @@ All significant architectural decisions for QuickSlideShowVideos are tracked her
   - **Dependency Inversion for Muxing:** `MediaContainerMuxer` in `src/engine/exporter.ts` abstracts `Mp4Muxer` and `WebmMuxer` behind a single interface so encoding loops are container-agnostic.
   - **Shared Engine Utilities:** Binary timeline lookup (`findSlideIndexAtTime`), sliding-window bitmap preloading (`BitmapCache.ensureSlideWindowLoaded`), audio loop/fade envelope scheduling (`scheduleAudioFadeEnvelope`), and display formatters (`src/utils/formatters.ts`) are centralized in single locations.
 - **Rationale:** Keeps the codebase easy to read, reason about, and extend without regression risk between live preview and offline export.
+
+## ADR-008: Local Browser Project Persistence (IndexedDB + `localStorage` Index Mirror)
+
+- **Decision:** Store saved projects (settings, slide order, rotations, duplicate hashes, and raw binary photo/audio `Blob`s) in browser-local IndexedDB (`QuickSlideShowProjectsDB`) behind a `ProjectStorageRepository` interface (`src/engine/projectStorage.ts`), paired with a lightweight `localStorage` metadata mirror (`quick-slideshow:projects-index:v1` and `quick-slideshow:last-project-id:v1`).
+- **Rationale:**
+  - `window.localStorage` alone is capped at ~5 MB of UTF-16 text and would immediately fail with `QuotaExceededError` on projects containing multiple smartphone photos or an MP3 track.
+  - IndexedDB natively persists binary `Blob`/`File` assets without base64 bloat, scales to hundreds of megabytes, and runs asynchronously off the main thread.
+  - Incremental asset persistence (keyed by `${projectId}::${assetId}` and diffed via `IDBIndex.getAllKeys`) makes re-saving a 200+ photo project after tweaking settings near-instant while deleting removed assets cleanly.
+  - All Vue reactive proxies are converted to plain structured-cloneable objects prior to `put()` to prevent `DataCloneError`, and cover thumbnail Blob URLs are explicitly revoked on refresh/unmount.

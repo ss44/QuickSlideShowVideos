@@ -5,8 +5,10 @@ import PreviewStage from './components/PreviewStage.vue'
 import SettingsSidebar from './components/SettingsSidebar.vue'
 import Filmstrip from './components/Filmstrip.vue'
 import ExportModal from './components/ExportModal.vue'
+import ProjectsModal from './components/ProjectsModal.vue'
 import { useSlideshow } from './composables/useSlideshow'
 import { usePwaInstall } from './composables/usePwaInstall'
+import { useProjectLibrary } from './composables/useProjectLibrary'
 import { exportSlideshowVideo } from './engine/exporter'
 import type { ExportProgress } from './types/slideshow'
 
@@ -40,6 +42,8 @@ const {
   clearMusic,
   setResolutionPreset,
   jumpToSlide,
+  captureProjectSnapshot,
+  restoreProject,
 } = useSlideshow()
 
 const {
@@ -54,6 +58,45 @@ const previewStageRef = ref<InstanceType<typeof PreviewStage> | null>(null)
 const isExportModalOpen = ref(false)
 const exportProgress = ref<ExportProgress | null>(null)
 let activeExportAbortController: AbortController | null = null
+
+const {
+  isStorageSupported,
+  savedProjects,
+  activeProjectId,
+  activeProjectName,
+  hasUnsavedChanges,
+  isProjectsModalOpen,
+  isLoadingList,
+  isSaving,
+  isOpeningProjectId,
+  saveProgress,
+  storageError,
+  justSavedFeedback,
+  storageQuota,
+  openProjectsModal,
+  closeProjectsModal,
+  saveCurrentProject,
+  quickSaveProject,
+  openSavedProject,
+  renameSavedProject,
+  deleteSavedProject,
+  detachActiveProject,
+  suggestProjectName,
+} = useProjectLibrary({
+  slides,
+  timing,
+  selectedTransitions,
+  transitionOrder,
+  effects,
+  music,
+  output,
+  duplicateDetection,
+  captureProjectSnapshot,
+  restoreProject,
+  onBeforeProjectRestore: () => {
+    previewStageRef.value?.clearBitmapCache()
+  },
+})
 
 function triggerBrowserDownload(blobUrl: string, fileName: string) {
   const downloadAnchor = document.createElement('a')
@@ -147,8 +190,29 @@ function downloadExportAgain() {
   }
 }
 
+function handleClearAllSlides() {
+  clearAllSlides()
+  detachActiveProject()
+}
+
 function onGlobalKeyDown(event: KeyboardEvent) {
-  if (isEditableFormElement(event.target) || isExportModalOpen.value) return
+  const isSaveShortcut = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's'
+  if (isSaveShortcut && !isExportModalOpen.value) {
+    if (slides.value.length > 0) {
+      event.preventDefault()
+      void quickSaveProject()
+    }
+    return
+  }
+
+  if (event.code === 'Escape' && isProjectsModalOpen.value) {
+    closeProjectsModal()
+    return
+  }
+
+  if (isEditableFormElement(event.target) || isExportModalOpen.value || isProjectsModalOpen.value) {
+    return
+  }
   if (slides.value.length === 0) return
 
   if (event.code === 'Space') {
@@ -185,9 +249,16 @@ onBeforeUnmount(() => {
       :can-offer-install="canOfferInstall"
       :is-installing="isInstalling"
       :is-ios-instructions-open="isIosInstructionsOpen"
+      :active-project-name="activeProjectName"
+      :has-unsaved-changes="hasUnsavedChanges"
+      :saved-project-count="savedProjects.length"
+      :is-saving-project="isSaving"
+      :just-saved-feedback="justSavedFeedback"
       @export="startExport"
       @install="promptInstall"
       @close-ios-instructions="closeIosInstructions"
+      @save-project="quickSaveProject"
+      @open-projects="openProjectsModal"
     />
 
     <div class="flex min-h-0 flex-1 flex-col overflow-y-auto md:flex-row md:overflow-hidden">
@@ -204,10 +275,14 @@ onBeforeUnmount(() => {
           :is-playing="isPlaying"
           :is-muted="isMuted"
           :active-slide-index="activeSlideIndex"
+          :saved-projects="savedProjects"
+          :opening-project-id="isOpeningProjectId"
           @update:current-time="currentTime = $event"
           @update:is-playing="isPlaying = $event"
           @update:is-muted="isMuted = $event"
           @add-files="addFiles"
+          @open-saved-project="openSavedProject"
+          @open-projects-modal="openProjectsModal"
         />
 
         <Filmstrip
@@ -221,7 +296,7 @@ onBeforeUnmount(() => {
           @rotate="rotateSlide"
           @reorder="reorderSlides"
           @sort="sortSlides"
-          @clear-all="clearAllSlides"
+          @clear-all="handleClearAllSlides"
         />
       </main>
 
@@ -256,6 +331,30 @@ onBeforeUnmount(() => {
       @cancel="cancelExport"
       @close="closeExportModal"
       @download-again="downloadExportAgain"
+    />
+
+    <ProjectsModal
+      :open="isProjectsModalOpen"
+      :is-storage-supported="isStorageSupported"
+      :saved-projects="savedProjects"
+      :active-project-id="activeProjectId"
+      :active-project-name="activeProjectName"
+      :suggested-project-name="suggestProjectName()"
+      :has-unsaved-changes="hasUnsavedChanges"
+      :slide-count="slides.length"
+      :total-duration="timeline.totalDuration"
+      :is-loading-list="isLoadingList"
+      :is-saving="isSaving"
+      :is-opening-project-id="isOpeningProjectId"
+      :save-progress="saveProgress"
+      :storage-error="storageError"
+      :just-saved-feedback="justSavedFeedback"
+      :storage-quota="storageQuota"
+      @close="closeProjectsModal"
+      @save="saveCurrentProject"
+      @open-project="openSavedProject"
+      @rename-project="({ projectId, name }) => renameSavedProject(projectId, name)"
+      @delete-project="deleteSavedProject"
     />
   </div>
 </template>

@@ -22,13 +22,15 @@ export function getAudioContext(): AudioContext {
   return sharedAudioContext
 }
 
-export async function decodeAudioFromFile(file: File): Promise<AudioBuffer> {
+export async function decodeAudioFromFile(file: Blob): Promise<AudioBuffer> {
   const rawBuffer = await file.arrayBuffer()
   const audioContext = getAudioContext()
   return await audioContext.decodeAudioData(rawBuffer.slice(0))
 }
 
-export async function decodeAudioFromUrl(url: string): Promise<AudioBuffer> {
+export async function fetchAndDecodeAudioFromUrl(
+  url: string,
+): Promise<{ buffer: AudioBuffer; audioBlob: Blob }> {
   let response: Response
   try {
     response = await fetch(url, { mode: 'cors' })
@@ -52,14 +54,22 @@ export async function decodeAudioFromUrl(url: string): Promise<AudioBuffer> {
   }
 
   const rawBuffer = await response.arrayBuffer()
+  // Retain a Blob copy before decodeAudioData detaches the ArrayBuffer so saved projects work offline
+  const audioBlob = new Blob([rawBuffer], { type: contentType || 'audio/mpeg' })
   const audioContext = getAudioContext()
   try {
-    return await audioContext.decodeAudioData(rawBuffer)
+    const buffer = await audioContext.decodeAudioData(rawBuffer.slice(0))
+    return { buffer, audioBlob }
   } catch {
     throw new Error(
       'Could not decode audio from this URL. Ensure it is a valid MP3, WAV, M4A, or OGG file.',
     )
   }
+}
+
+export async function decodeAudioFromUrl(url: string): Promise<AudioBuffer> {
+  const { buffer } = await fetchAndDecodeAudioFromUrl(url)
+  return buffer
 }
 
 /**
