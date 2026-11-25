@@ -11,10 +11,18 @@ export type TransitionType =
   | 'dip-black'
   | 'wipe-left'
 
-export interface TransitionOption {
-  id: TransitionType
+export type TransitionOrderMode = 'cycle' | 'random'
+
+export type SlideRotationDegrees = 0 | 90 | 180 | 270
+
+export type SlideSortMode = 'name' | 'date-asc' | 'date-desc' | 'reverse' | 'shuffle'
+
+export interface LabeledOption<T extends string | number> {
+  id: T
   label: string
 }
+
+export type TransitionOption = LabeledOption<TransitionType>
 
 export const TRANSITION_OPTIONS: TransitionOption[] = [
   { id: 'crossfade', label: 'Crossfade' },
@@ -32,12 +40,15 @@ export const TRANSITION_OPTIONS: TransitionOption[] = [
 
 export type FitMode = 'blur-fill' | 'cover' | 'contain'
 
+export const FIT_MODE_OPTIONS: LabeledOption<FitMode>[] = [
+  { id: 'blur-fill', label: 'Blur Fill' },
+  { id: 'cover', label: 'Crop Fill' },
+  { id: 'contain', label: 'Black Bars' },
+]
+
 export type ColorLook = 'none' | 'warm' | 'crisp' | 'vintage' | 'bw' | 'cinematic'
 
-export interface ColorLookOption {
-  id: ColorLook
-  label: string
-}
+export type ColorLookOption = LabeledOption<ColorLook>
 
 export const COLOR_LOOK_OPTIONS: ColorLookOption[] = [
   { id: 'none', label: 'Original' },
@@ -46,6 +57,13 @@ export const COLOR_LOOK_OPTIONS: ColorLookOption[] = [
   { id: 'vintage', label: 'Vintage' },
   { id: 'cinematic', label: 'Cinematic' },
   { id: 'bw', label: 'B&W' },
+]
+
+export const SLIDE_SORT_OPTIONS: LabeledOption<SlideSortMode>[] = [
+  { id: 'name', label: 'Filename (A–Z)' },
+  { id: 'date-asc', label: 'Date (Oldest first)' },
+  { id: 'date-desc', label: 'Date (Newest first)' },
+  { id: 'reverse', label: 'Reverse Order' },
 ]
 
 export interface SlideImage {
@@ -57,7 +75,7 @@ export interface SlideImage {
   width: number
   height: number
   thumbnailUrl: string | null
-  rotation: 0 | 90 | 180 | 270
+  rotation: SlideRotationDegrees
 }
 
 export interface TimingConfig {
@@ -68,15 +86,17 @@ export interface TimingConfig {
 
 export interface SmartEffectsConfig {
   kenBurns: boolean
-  kenBurnsIntensity: number // 0.04 to 0.2
+  kenBurnsIntensity: number // 0.03 to 0.18
   fitMode: FitMode
   beatSync: boolean
   colorLook: ColorLook
   vignette: boolean
 }
 
+export type MusicSourceType = 'none' | 'file' | 'url'
+
 export interface MusicConfig {
-  sourceType: 'none' | 'file' | 'url'
+  sourceType: MusicSourceType
   name: string
   url: string
   duration: number
@@ -92,6 +112,22 @@ export interface MusicConfig {
 }
 
 export type OutputFormat = 'mp4' | 'webm'
+
+export const OUTPUT_FORMAT_OPTIONS: LabeledOption<OutputFormat>[] = [
+  { id: 'mp4', label: 'MP4 (H.264)' },
+  { id: 'webm', label: 'WebM (VP9)' },
+]
+
+export type VideoFrameRate = 30 | 60
+
+export const FRAME_RATE_OPTIONS: VideoFrameRate[] = [30, 60]
+
+export type VideoQualityTier = 'standard' | 'high'
+
+export const VIDEO_QUALITY_OPTIONS: LabeledOption<VideoQualityTier>[] = [
+  { id: 'standard', label: 'Std' },
+  { id: 'high', label: 'High' },
+]
 
 export interface ResolutionPreset {
   id: string
@@ -116,8 +152,8 @@ export interface OutputConfig {
   presetId: string
   width: number
   height: number
-  fps: 30 | 60
-  quality: 'standard' | 'high'
+  fps: VideoFrameRate
+  quality: VideoQualityTier
 }
 
 export interface TimelineSlide {
@@ -138,8 +174,17 @@ export interface ComputedTimeline {
   beatSnapped: boolean
 }
 
+export type ExportPhase =
+  | 'preparing'
+  | 'rendering'
+  | 'audio'
+  | 'finalizing'
+  | 'done'
+  | 'error'
+  | 'cancelled'
+
 export interface ExportProgress {
-  phase: 'preparing' | 'rendering' | 'audio' | 'finalizing' | 'done' | 'error' | 'cancelled'
+  phase: ExportPhase
   currentFrame: number
   totalFrames: number
   percent: number

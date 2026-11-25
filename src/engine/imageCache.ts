@@ -1,72 +1,101 @@
-import type { SlideImage } from '../types/slideshow'
+import type { ComputedTimeline, SlideImage } from '../types/slideshow'
 
-const THUMB_MAX_SIZE = 220
+const THUMBNAIL_MAX_DIMENSION_PX = 220
+const THUMBNAIL_JPEG_QUALITY = 0.78
+const THUMBNAIL_MAX_CONCURRENCY = 4
 
 /**
- * Generates a lightweight thumbnail Blob URL and reads natural dimensions.
- * Concurrency-limited so dropping 300+ photos stays responsive.
+ * Slight overscan multiplier (1.25x output dimension) so Ken Burns zoom-ins up to 18%
+ * remain sharp without decoding full 12-50MP camera originals into GPU memory.
+ */
+const BITMAP_OVERSCAN_SCALE = 1.25
+
+type ThumbnailCompletionCallback = (
+  thumbnailBlobUrl: string,
+  naturalWidth: number,
+  naturalHeight: number,
+) => void
+
+interface ThumbnailGenerationJob {
+  slide: SlideImage
+  onComplete: ThumbnailCompletionCallback
+}
+
+/**
+ * Generates lightweight ~220px JPEG thumbnail Blob URLs and reads natural image dimensions.
+ * Concurrency-limited to 4 simultaneous decodes so dropping 300+ photos never freezes the UI thread.
  */
 class ThumbnailQueue {
-  private queue: Array<{ slide: SlideImage; onDone: (url: string, w: number, h: number) => void }> = []
-  private active = 0
-  private maxConcurrency = 4
+  private pendingJobs: ThumbnailGenerationJob[] = []
+  private activeWorkerCount = 0
 
-  enqueue(slide: SlideImage, onDone: (url: string, w: number, h: number) => void) {
-    this.queue.push({ slide, onDone })
-    this.pump()
+  enqueue(slide: SlideImage, onComplete: ThumbnailCompletionCallback) {
+    this.pendingJobs.push({ slide, onComplete })
+    this.processNextJobs()
   }
 
   clear() {
-    this.queue = []
+    this.pendingJobs = []
   }
 
-  private pump() {
-    while (this.active < this.maxConcurrency && this.queue.length > 0) {
-      const job = this.queue.shift()!
-      this.active++
-      this.process(job.slide)
-        .then((res) => {
-          if (res) job.onDone(res.url, res.width, res.height)
+  private processNextJobs() {
+    while (this.activeWorkerCount < THUMBNAIL_MAX_CONCURRENCY && this.pendingJobs.length > 0) {
+      const nextJob = this.pendingJobs.shift()!
+      this.activeWorkerCount++
+
+      this.generateThumbnail(nextJob.slide)
+        .then((result) => {
+          if (result) {
+            nextJob.onComplete(result.thumbnailBlobUrl, result.naturalWidth, result.naturalHeight)
+          }
         })
         .catch(() => {
-          // Fallback: use raw object URL if createImageBitmap fails
-          const fallbackUrl = URL.createObjectURL(job.slide.file)
-          job.onDone(fallbackUrl, 1920, 1080)
+          // Fallback to direct object URL if createImageBitmap is unsupported for an exotic image subtype
+          const fallbackObjectUrl = URL.createObjectURL(nextJob.slide.file)
+          nextJob.onComplete(fallbackObjectUrl, 1920, 1080)
         })
         .finally(() => {
-          this.active--
-          this.pump()
+          this.activeWorkerCount--
+          this.processNextJobs()
         })
     }
   }
 
-  private async process(slide: SlideImage): Promise<{ url: string; width: number; height: number } | null> {
-    const bitmap = await createImageBitmap(slide.file, { imageOrientation: 'from-image' })
-    const origW = bitmap.width
-    const origH = bitmap.height
-    const scale = Math.min(1, THUMB_MAX_SIZE / Math.max(origW, origH))
-    const tw = Math.max(1, Math.round(origW * scale))
-    const th = Math.max(1, Math.round(origH * scale))
+  private async generateThumbnail(
+    slide: SlideImage,
+  ): Promise<{ thumbnailBlobUrl: string; naturalWidth: number; naturalHeight: number } | null> {
+    const decodedBitmap = await createImageBitmap(slide.file, { imageOrientation: 'from-image' })
+    const naturalWidth = decodedBitmap.width
+    const naturalHeight = decodedBitmap.height
 
-    const canvas = document.createElement('canvas')
-    canvas.width = tw
-    canvas.height = th
-    const ctx = canvas.getContext('2d')
-    if (!ctx) {
-      bitmap.close()
+    const downscaleFactor = Math.min(
+      1,
+      THUMBNAIL_MAX_DIMENSION_PX / Math.max(naturalWidth, naturalHeight),
+    )
+    const thumbWidth = Math.max(1, Math.round(naturalWidth * downscaleFactor))
+    const thumbHeight = Math.max(1, Math.round(naturalHeight * downscaleFactor))
+
+    const thumbCanvas = document.createElement('canvas')
+    thumbCanvas.width = thumbWidth
+    thumbCanvas.height = thumbHeight
+    const thumbCtx = thumbCanvas.getContext('2d')
+    if (!thumbCtx) {
+      decodedBitmap.close()
       return null
     }
-    ctx.drawImage(bitmap, 0, 0, tw, th)
-    bitmap.close()
 
-    const blob = await new Promise<Blob | null>((resolve) =>
-      canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.78),
+    thumbCtx.drawImage(decodedBitmap, 0, 0, thumbWidth, thumbHeight)
+    decodedBitmap.close()
+
+    const jpegBlob = await new Promise<Blob | null>((resolve) =>
+      thumbCanvas.toBlob((blob) => resolve(blob), 'image/jpeg', THUMBNAIL_JPEG_QUALITY),
     )
-    if (!blob) return null
+    if (!jpegBlob) return null
+
     return {
-      url: URL.createObjectURL(blob),
-      width: origW,
-      height: origH,
+      thumbnailBlobUrl: URL.createObjectURL(jpegBlob),
+      naturalWidth,
+      naturalHeight,
     }
   }
 }
@@ -74,126 +103,187 @@ class ThumbnailQueue {
 export const thumbnailQueue = new ThumbnailQueue()
 
 /**
- * Sliding-window LRU ImageBitmap cache.
- * Decodes images scaled to the target render dimension and closes evicted bitmaps
- * so hundreds of high-res photos never exhaust browser memory.
+ * Sliding-window Least-Recently-Used (LRU) `ImageBitmap` cache.
+ * Decodes photos scaled to the target render resolution and explicitly calls `.close()` on evicted
+ * bitmaps so hundreds of high-resolution photos never exhaust browser GPU/RAM memory.
  */
 export class BitmapCache {
-  private cache = new Map<string, ImageBitmap>()
-  private inflight = new Map<string, Promise<ImageBitmap | null>>()
-  private maxEntries: number
-  private maxDim: number
+  private lruCache = new Map<string, ImageBitmap>()
+  private inflightDecodes = new Map<string, Promise<ImageBitmap | null>>()
+  private maxCachedEntries: number
+  private targetMaxDimensionPx: number
 
-  constructor(maxEntries = 10, maxDim = 1920) {
-    this.maxEntries = maxEntries
-    this.maxDim = maxDim
+  constructor(maxCachedEntries = 10, targetMaxDimensionPx = 1920) {
+    this.maxCachedEntries = maxCachedEntries
+    this.targetMaxDimensionPx = targetMaxDimensionPx
   }
 
-  setMaxDimension(dim: number) {
-    const clamped = Math.max(720, Math.min(3840, dim))
-    if (Math.abs(clamped - this.maxDim) > 200) {
-      this.maxDim = clamped
+  setMaxDimension(dimensionPx: number) {
+    const clampedDimension = Math.max(720, Math.min(3840, dimensionPx))
+    if (Math.abs(clampedDimension - this.targetMaxDimensionPx) > 200) {
+      this.targetMaxDimensionPx = clampedDimension
       this.clear()
     }
   }
 
+  /**
+   * Returns a cached `ImageBitmap` synchronously if present, refreshing its LRU recency order.
+   */
   getSync(slideId: string): ImageBitmap | null {
-    const bmp = this.cache.get(slideId)
-    if (bmp) {
-      // Touch for LRU
-      this.cache.delete(slideId)
-      this.cache.set(slideId, bmp)
-      return bmp
+    const existingBitmap = this.lruCache.get(slideId)
+    if (existingBitmap) {
+      // Re-insert key at the end of Map iteration order to mark as most-recently used
+      this.lruCache.delete(slideId)
+      this.lruCache.set(slideId, existingBitmap)
+      return existingBitmap
     }
     return null
   }
 
+  /**
+   * Decodes or retrieves the `ImageBitmap` for `slide`, deduplicating concurrent requests for the same slide.
+   */
   async get(slide: SlideImage): Promise<ImageBitmap | null> {
-    const existing = this.getSync(slide.id)
-    if (existing) return existing
+    const cachedBitmap = this.getSync(slide.id)
+    if (cachedBitmap) return cachedBitmap
 
-    const pending = this.inflight.get(slide.id)
-    if (pending) return pending
+    const pendingDecode = this.inflightDecodes.get(slide.id)
+    if (pendingDecode) return pendingDecode
 
-    const promise = this.decode(slide)
-      .then((bmp) => {
-        this.inflight.delete(slide.id)
-        if (bmp) {
-          this.put(slide.id, bmp)
+    const decodePromise = this.decodeScaledBitmap(slide)
+      .then((bitmap) => {
+        this.inflightDecodes.delete(slide.id)
+        if (bitmap) {
+          this.storeInLruCache(slide.id, bitmap)
         }
-        return bmp
+        return bitmap
       })
       .catch(() => {
-        this.inflight.delete(slide.id)
+        this.inflightDecodes.delete(slide.id)
         return null
       })
 
-    this.inflight.set(slide.id, promise)
-    return promise
+    this.inflightDecodes.set(slide.id, decodePromise)
+    return decodePromise
   }
 
-  preload(slides: SlideImage[]) {
-    for (const s of slides) {
-      if (!this.cache.has(s.id) && !this.inflight.has(s.id)) {
-        void this.get(s)
+  /**
+   * Starts background decoding for upcoming slides without blocking the caller.
+   */
+  preload(slidesToPreload: SlideImage[]) {
+    for (const slide of slidesToPreload) {
+      if (!this.lruCache.has(slide.id) && !this.inflightDecodes.has(slide.id)) {
+        void this.get(slide)
       }
+    }
+  }
+
+  /**
+   * Ensures the active slide (and the outgoing previous slide during transitions) are loaded,
+   * while kicking off asynchronous preloading for the next `lookaheadCount` slides.
+   * Shared by both live Preview and WebCodecs Export to avoid duplicate sliding-window logic.
+   */
+  async ensureSlideWindowLoaded(
+    slides: SlideImage[],
+    timeline: ComputedTimeline,
+    activeTimelineIndex: number,
+    options: { lookaheadCount: number; awaitActiveBitmaps: boolean },
+  ): Promise<void> {
+    if (activeTimelineIndex < 0 || activeTimelineIndex >= timeline.slides.length) {
+      return
+    }
+
+    const activeSlide = slides[timeline.slides[activeTimelineIndex].slideIndex]
+    const previousSlide =
+      activeTimelineIndex > 0
+        ? slides[timeline.slides[activeTimelineIndex - 1].slideIndex]
+        : null
+
+    const requiredDecodes: Promise<ImageBitmap | null>[] = []
+    if (activeSlide && !this.getSync(activeSlide.id)) {
+      requiredDecodes.push(this.get(activeSlide))
+    }
+    if (previousSlide && !this.getSync(previousSlide.id)) {
+      requiredDecodes.push(this.get(previousSlide))
+    }
+
+    const upcomingSlides: SlideImage[] = []
+    for (let offset = 1; offset <= options.lookaheadCount; offset++) {
+      const lookaheadIndex = activeTimelineIndex + offset
+      if (lookaheadIndex < timeline.slides.length) {
+        const upcomingSlide = slides[timeline.slides[lookaheadIndex].slideIndex]
+        if (upcomingSlide) upcomingSlides.push(upcomingSlide)
+      }
+    }
+    if (upcomingSlides.length > 0) {
+      this.preload(upcomingSlides)
+    }
+
+    if (options.awaitActiveBitmaps && requiredDecodes.length > 0) {
+      await Promise.all(requiredDecodes)
     }
   }
 
   evict(slideId: string) {
-    const bmp = this.cache.get(slideId)
-    if (bmp) {
-      bmp.close()
-      this.cache.delete(slideId)
+    const bitmap = this.lruCache.get(slideId)
+    if (bitmap) {
+      bitmap.close()
+      this.lruCache.delete(slideId)
     }
   }
 
   clear() {
-    for (const bmp of this.cache.values()) {
-      bmp.close()
+    for (const bitmap of this.lruCache.values()) {
+      bitmap.close()
     }
-    this.cache.clear()
-    this.inflight.clear()
+    this.lruCache.clear()
+    this.inflightDecodes.clear()
   }
 
-  private put(id: string, bmp: ImageBitmap) {
-    if (this.cache.has(id)) {
-      const old = this.cache.get(id)!
-      if (old !== bmp) old.close()
-      this.cache.delete(id)
+  private storeInLruCache(slideId: string, newBitmap: ImageBitmap) {
+    if (this.lruCache.has(slideId)) {
+      const previousBitmap = this.lruCache.get(slideId)!
+      if (previousBitmap !== newBitmap) previousBitmap.close()
+      this.lruCache.delete(slideId)
     }
-    this.cache.set(id, bmp)
+    this.lruCache.set(slideId, newBitmap)
 
-    while (this.cache.size > this.maxEntries) {
-      const oldestKey = this.cache.keys().next().value
+    // Evict oldest entries (at the head of Map iteration order) when capacity is exceeded
+    while (this.lruCache.size > this.maxCachedEntries) {
+      const oldestKey = this.lruCache.keys().next().value
       if (oldestKey !== undefined) {
-        const oldest = this.cache.get(oldestKey)
-        oldest?.close()
-        this.cache.delete(oldestKey)
+        const evictedBitmap = this.lruCache.get(oldestKey)
+        evictedBitmap?.close()
+        this.lruCache.delete(oldestKey)
       }
     }
   }
 
-  private async decode(slide: SlideImage): Promise<ImageBitmap | null> {
-    // First decode with EXIF orientation; downscale if larger than maxDim * 1.25
-    const raw = await createImageBitmap(slide.file, { imageOrientation: 'from-image' })
-    const maxAllowed = Math.round(this.maxDim * 1.25)
-    if (raw.width <= maxAllowed && raw.height <= maxAllowed) {
-      return raw
+  private async decodeScaledBitmap(slide: SlideImage): Promise<ImageBitmap | null> {
+    const fullBitmap = await createImageBitmap(slide.file, { imageOrientation: 'from-image' })
+    const maxAllowedDimensionPx = Math.round(this.targetMaxDimensionPx * BITMAP_OVERSCAN_SCALE)
+
+    if (
+      fullBitmap.width <= maxAllowedDimensionPx &&
+      fullBitmap.height <= maxAllowedDimensionPx
+    ) {
+      return fullBitmap
     }
-    const scale = maxAllowed / Math.max(raw.width, raw.height)
-    const targetW = Math.max(1, Math.round(raw.width * scale))
-    const targetH = Math.max(1, Math.round(raw.height * scale))
+
+    const scaleFactor = maxAllowedDimensionPx / Math.max(fullBitmap.width, fullBitmap.height)
+    const targetWidth = Math.max(1, Math.round(fullBitmap.width * scaleFactor))
+    const targetHeight = Math.max(1, Math.round(fullBitmap.height * scaleFactor))
+
     try {
-      const scaled = await createImageBitmap(raw, {
-        resizeWidth: targetW,
-        resizeHeight: targetH,
+      const resizedBitmap = await createImageBitmap(fullBitmap, {
+        resizeWidth: targetWidth,
+        resizeHeight: targetHeight,
         resizeQuality: 'high',
       })
-      raw.close()
-      return scaled
+      fullBitmap.close()
+      return resizedBitmap
     } catch {
-      return raw
+      return fullBitmap
     }
   }
 }

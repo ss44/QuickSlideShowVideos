@@ -1,18 +1,31 @@
 import type { MusicConfig } from '../types/slideshow'
 
-let sharedAudioCtx: AudioContext | null = null
+const FADE_IN_MAX_DURATION_SECONDS = 1.5
+const FADE_OUT_MAX_DURATION_SECONDS = 2.5
+const FADE_MAX_SHARE_OF_TOTAL_VIDEO = 0.25
+
+/**
+ * Signal processing constants for client-side energy-flux beat detection.
+ */
+const BEAT_WINDOW_DURATION_SECONDS = 0.023 // ~23ms window (~1024 samples @ 44.1kHz)
+const BEAT_LOCAL_THRESHOLD_HALF_WINDOW_SECONDS = 0.5 // +/-0.5s (1.0s local moving average)
+const BEAT_MIN_INTERVAL_SECONDS = 0.28 // Refractory period (~214 BPM ceiling)
+const BEAT_THRESHOLD_MULTIPLIER = 1.65 // Peak must exceed local mean onset flux by 65%
+const BEAT_MIN_FLUX_FLOOR = 0.005 // Ignore silent/near-silent passages
+
+let sharedAudioContext: AudioContext | null = null
 
 export function getAudioContext(): AudioContext {
-  if (!sharedAudioCtx) {
-    sharedAudioCtx = new AudioContext()
+  if (!sharedAudioContext) {
+    sharedAudioContext = new AudioContext()
   }
-  return sharedAudioCtx
+  return sharedAudioContext
 }
 
 export async function decodeAudioFromFile(file: File): Promise<AudioBuffer> {
-  const arrayBuffer = await file.arrayBuffer()
-  const ctx = getAudioContext()
-  return await ctx.decodeAudioData(arrayBuffer.slice(0))
+  const rawBuffer = await file.arrayBuffer()
+  const audioContext = getAudioContext()
+  return await audioContext.decodeAudioData(rawBuffer.slice(0))
 }
 
 export async function decodeAudioFromUrl(url: string): Promise<AudioBuffer> {
@@ -26,7 +39,9 @@ export async function decodeAudioFromUrl(url: string): Promise<AudioBuffer> {
   }
 
   if (!response.ok) {
-    throw new Error(`Audio link returned HTTP ${response.status}. Make sure it points directly to an MP3/WAV/OGG file.`)
+    throw new Error(
+      `Audio link returned HTTP ${response.status}. Make sure it points directly to an MP3/WAV/OGG file.`,
+    )
   }
 
   const contentType = response.headers.get('content-type') || ''
@@ -36,231 +51,345 @@ export async function decodeAudioFromUrl(url: string): Promise<AudioBuffer> {
     )
   }
 
-  const arrayBuffer = await response.arrayBuffer()
-  const ctx = getAudioContext()
+  const rawBuffer = await response.arrayBuffer()
+  const audioContext = getAudioContext()
   try {
-    return await ctx.decodeAudioData(arrayBuffer)
+    return await audioContext.decodeAudioData(rawBuffer)
   } catch {
-    throw new Error('Could not decode audio from this URL. Ensure it is a valid MP3, WAV, M4A, or OGG file.')
+    throw new Error(
+      'Could not decode audio from this URL. Ensure it is a valid MP3, WAV, M4A, or OGG file.',
+    )
   }
 }
 
 /**
- * Lightweight client-side beat/onset detector using short-time energy flux.
+ * Downmixes a multi-channel `AudioBuffer` into a single mono `Float32Array` for analysis.
+ */
+function downmixToMono(buffer: AudioBuffer): Float32Array {
+  const sampleCount = buffer.length
+  const channelCount = buffer.numberOfChannels
+  const monoSamples = new Float32Array(sampleCount)
+
+  for (let channelIndex = 0; channelIndex < channelCount; channelIndex++) {
+    const channelData = buffer.getChannelData(channelIndex)
+    for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++) {
+      monoSamples[sampleIndex] += channelData[sampleIndex] / channelCount
+    }
+  }
+  return monoSamples
+}
+
+/**
+ * Computes Root-Mean-Square (RMS) loudness across non-overlapping ~23ms windows.
+ */
+function computeWindowedRmsEnergy(monoSamples: Float32Array, hopSizeSamples: number): Float32Array {
+  const windowCount = Math.floor(monoSamples.length / hopSizeSamples)
+  const rmsEnergies = new Float32Array(windowCount)
+
+  for (let windowIndex = 0; windowIndex < windowCount; windowIndex++) {
+    let sumOfSquares = 0
+    const startSample = windowIndex * hopSizeSamples
+    const endSample = Math.min(startSample + hopSizeSamples, monoSamples.length)
+    for (let sampleIndex = startSample; sampleIndex < endSample; sampleIndex++) {
+      const sample = monoSamples[sampleIndex]
+      sumOfSquares += sample * sample
+    }
+    rmsEnergies[windowIndex] = Math.sqrt(sumOfSquares / (endSample - startSample))
+  }
+  return rmsEnergies
+}
+
+/**
+ * Computes half-wave rectified energy flux (positive first-difference of RMS energy).
+ * Positive energy spikes correspond to percussive note onsets (drum hits, chord attacks)
+ * while ignoring energy decays.
+ */
+function computePositiveEnergyFlux(rmsEnergies: Float32Array): Float32Array {
+  const energyFlux = new Float32Array(rmsEnergies.length)
+  for (let windowIndex = 1; windowIndex < rmsEnergies.length; windowIndex++) {
+    energyFlux[windowIndex] = Math.max(0, rmsEnergies[windowIndex] - rmsEnergies[windowIndex - 1])
+  }
+  return energyFlux
+}
+
+/**
+ * Lightweight client-side beat/onset detector using short-time positive energy flux.
  * Runs in <100ms for a typical 3-5 minute song.
  */
 export function detectBeats(buffer: AudioBuffer): number[] {
-  const sampleRate = buffer.sampleRate
-  const length = buffer.length
-  const numChannels = buffer.numberOfChannels
+  const sampleRateHz = buffer.sampleRate
+  const hopSizeSamples = Math.max(512, Math.round(sampleRateHz * BEAT_WINDOW_DURATION_SECONDS))
+  const windowDurationSeconds = hopSizeSamples / sampleRateHz
 
-  // Downmix to mono
-  const mono = new Float32Array(length)
-  for (let c = 0; c < numChannels; c++) {
-    const ch = buffer.getChannelData(c)
-    for (let i = 0; i < length; i++) {
-      mono[i] += ch[i] / numChannels
+  const monoSamples = downmixToMono(buffer)
+  const rmsEnergies = computeWindowedRmsEnergy(monoSamples, hopSizeSamples)
+  if (rmsEnergies.length < 10) return []
+
+  const energyFlux = computePositiveEnergyFlux(rmsEnergies)
+  const windowCount = energyFlux.length
+
+  const thresholdHalfWindowFrames = Math.max(
+    8,
+    Math.round(BEAT_LOCAL_THRESHOLD_HALF_WINDOW_SECONDS / windowDurationSeconds),
+  )
+  const minPeakIntervalFrames = Math.max(
+    6,
+    Math.round(BEAT_MIN_INTERVAL_SECONDS / windowDurationSeconds),
+  )
+
+  const detectedBeatTimesSeconds: number[] = []
+  let lastBeatWindowIndex = -minPeakIntervalFrames
+
+  for (let windowIndex = 2; windowIndex < windowCount - 2; windowIndex++) {
+    const currentFlux = energyFlux[windowIndex]
+    if (currentFlux <= BEAT_MIN_FLUX_FLOOR) continue
+
+    // Require a local peak relative to immediate neighbors
+    const isLocalMaximum =
+      currentFlux >= energyFlux[windowIndex - 1] && currentFlux >= energyFlux[windowIndex + 1]
+    if (!isLocalMaximum) continue
+
+    // Compare against local moving average (~1s window) to adapt to quiet vs loud sections
+    const localStart = Math.max(0, windowIndex - thresholdHalfWindowFrames)
+    const localEnd = Math.min(windowCount - 1, windowIndex + thresholdHalfWindowFrames)
+    let localFluxSum = 0
+    for (let neighborIndex = localStart; neighborIndex <= localEnd; neighborIndex++) {
+      localFluxSum += energyFlux[neighborIndex]
+    }
+    const localFluxMean = localFluxSum / (localEnd - localStart + 1)
+
+    const exceedsAdaptiveThreshold = currentFlux > localFluxMean * BEAT_THRESHOLD_MULTIPLIER
+    const respectsRefractoryGap = windowIndex - lastBeatWindowIndex >= minPeakIntervalFrames
+
+    if (exceedsAdaptiveThreshold && respectsRefractoryGap) {
+      detectedBeatTimesSeconds.push(windowIndex * windowDurationSeconds)
+      lastBeatWindowIndex = windowIndex
     }
   }
 
-  // Compute RMS energy in ~23ms windows (1024 samples at 44.1kHz)
-  const hopSize = Math.max(512, Math.round(sampleRate * 0.023))
-  const frameCount = Math.floor(length / hopSize)
-  if (frameCount < 10) return []
-
-  const energies = new Float32Array(frameCount)
-  for (let f = 0; f < frameCount; f++) {
-    let sum = 0
-    const start = f * hopSize
-    const end = Math.min(start + hopSize, length)
-    for (let i = start; i < end; i++) {
-      const s = mono[i]
-      sum += s * s
-    }
-    energies[f] = Math.sqrt(sum / (end - start))
-  }
-
-  // Compute positive energy flux (onset strength)
-  const flux = new Float32Array(frameCount)
-  for (let f = 1; f < frameCount; f++) {
-    flux[f] = Math.max(0, energies[f] - energies[f - 1])
-  }
-
-  // Adaptive local threshold over ~1 second window
-  const windowHalf = Math.max(8, Math.round(0.5 / (hopSize / sampleRate)))
-  const minPeakIntervalFrames = Math.max(6, Math.round(0.28 / (hopSize / sampleRate))) // max ~210 BPM
-  const beats: number[] = []
-  let lastBeatFrame = -minPeakIntervalFrames
-
-  for (let f = 2; f < frameCount - 2; f++) {
-    const val = flux[f]
-    if (val <= 0.005) continue
-    // Local maximum check
-    if (val < flux[f - 1] || val < flux[f + 1]) continue
-
-    const wStart = Math.max(0, f - windowHalf)
-    const wEnd = Math.min(frameCount - 1, f + windowHalf)
-    let localMean = 0
-    for (let k = wStart; k <= wEnd; k++) {
-      localMean += flux[k]
-    }
-    localMean /= wEnd - wStart + 1
-
-    if (val > localMean * 1.65 && f - lastBeatFrame >= minPeakIntervalFrames) {
-      beats.push((f * hopSize) / sampleRate)
-      lastBeatFrame = f
-    }
-  }
-
-  return beats
+  return detectedBeatTimesSeconds
 }
 
 /**
- * Synchronized Web Audio preview player that handles offset, looping, volume, and fade-in/out.
+ * Computes safe start offset and remaining playable duration within an `AudioBuffer`.
+ */
+function computePlayableTrackBounds(buffer: AudioBuffer, requestedStartOffsetSeconds: number) {
+  const clampedStartOffsetSeconds = Math.min(
+    Math.max(0, requestedStartOffsetSeconds),
+    Math.max(0, buffer.duration - 0.1),
+  )
+  const playableTrackDurationSeconds = Math.max(0.1, buffer.duration - clampedStartOffsetSeconds)
+  return { clampedStartOffsetSeconds, playableTrackDurationSeconds }
+}
+
+/**
+ * Configures an `AudioBufferSourceNode` with consistent loop boundaries so looped tracks
+ * wrap back to `clampedStartOffsetSeconds` rather than `0:00`.
+ */
+function configureLoopingAudioSource(
+  sourceNode: AudioBufferSourceNode,
+  buffer: AudioBuffer,
+  clampedStartOffsetSeconds: number,
+  shouldLoop: boolean,
+) {
+  sourceNode.buffer = buffer
+  sourceNode.loop = shouldLoop
+  if (shouldLoop) {
+    sourceNode.loopStart = clampedStartOffsetSeconds
+    sourceNode.loopEnd = buffer.duration
+  }
+}
+
+/**
+ * Schedules fade-in and fade-out gain ramps on an `AudioParam`.
+ * Shared between live preview (`PreviewAudioPlayer`) and offline export (`renderExportAudioBuffer`)
+ * so both produce identical volume envelopes, even when preview playback starts mid-timeline.
+ */
+function scheduleAudioFadeEnvelope(
+  gainParam: AudioParam,
+  params: {
+    targetVolume: number
+    timelineStartTimeSeconds: number
+    totalVideoDurationSeconds: number
+    audioContextStartTime: number
+    fadeInEnabled: boolean
+    fadeOutEnabled: boolean
+  },
+) {
+  const {
+    targetVolume,
+    timelineStartTimeSeconds,
+    totalVideoDurationSeconds,
+    audioContextStartTime,
+    fadeInEnabled,
+    fadeOutEnabled,
+  } = params
+
+  const remainingVideoSeconds = Math.max(0.05, totalVideoDurationSeconds - timelineStartTimeSeconds)
+  gainParam.setValueAtTime(targetVolume, audioContextStartTime)
+
+  if (targetVolume <= 0) return
+
+  const fadeInDurationSeconds = Math.min(
+    FADE_IN_MAX_DURATION_SECONDS,
+    totalVideoDurationSeconds * FADE_MAX_SHARE_OF_TOTAL_VIDEO,
+  )
+  if (fadeInEnabled && fadeInDurationSeconds > 0 && timelineStartTimeSeconds < fadeInDurationSeconds) {
+    const remainingFadeInSeconds = fadeInDurationSeconds - timelineStartTimeSeconds
+    const initialFadeRatio = timelineStartTimeSeconds / fadeInDurationSeconds
+    gainParam.setValueAtTime(targetVolume * initialFadeRatio, audioContextStartTime)
+    gainParam.linearRampToValueAtTime(
+      targetVolume,
+      audioContextStartTime + remainingFadeInSeconds,
+    )
+  }
+
+  const fadeOutDurationSeconds = Math.min(
+    FADE_OUT_MAX_DURATION_SECONDS,
+    totalVideoDurationSeconds * FADE_MAX_SHARE_OF_TOTAL_VIDEO,
+  )
+  if (fadeOutEnabled && fadeOutDurationSeconds > 0) {
+    const fadeOutStartInVideoSeconds = Math.max(
+      0,
+      totalVideoDurationSeconds - fadeOutDurationSeconds,
+    )
+    if (timelineStartTimeSeconds >= fadeOutStartInVideoSeconds) {
+      const currentFadeOutRatio = Math.max(
+        0,
+        (totalVideoDurationSeconds - timelineStartTimeSeconds) / fadeOutDurationSeconds,
+      )
+      gainParam.setValueAtTime(targetVolume * currentFadeOutRatio, audioContextStartTime)
+      gainParam.linearRampToValueAtTime(0, audioContextStartTime + remainingVideoSeconds)
+    } else {
+      const delayUntilFadeOutSeconds = fadeOutStartInVideoSeconds - timelineStartTimeSeconds
+      gainParam.setValueAtTime(targetVolume, audioContextStartTime + delayUntilFadeOutSeconds)
+      gainParam.linearRampToValueAtTime(0, audioContextStartTime + remainingVideoSeconds)
+    }
+  }
+}
+
+/**
+ * Synchronized Web Audio preview player that handles start offset, looping, volume, and fade-in/out.
  */
 export class PreviewAudioPlayer {
-  private source: AudioBufferSourceNode | null = null
-  private gainNode: GainNode | null = null
+  private activeSourceNode: AudioBufferSourceNode | null = null
+  private activeGainNode: GainNode | null = null
 
   stop() {
-    if (this.source) {
+    if (this.activeSourceNode) {
       try {
-        this.source.stop()
+        this.activeSourceNode.stop()
       } catch {
-        // already stopped
+        // Ignore if source already completed naturally
       }
-      this.source.disconnect()
-      this.source = null
+      this.activeSourceNode.disconnect()
+      this.activeSourceNode = null
     }
-    if (this.gainNode) {
-      this.gainNode.disconnect()
-      this.gainNode = null
+    if (this.activeGainNode) {
+      this.activeGainNode.disconnect()
+      this.activeGainNode = null
     }
   }
 
-  start(music: MusicConfig, timelineTime: number, totalDuration: number, muted: boolean) {
+  start(
+    music: MusicConfig,
+    timelineTimeSeconds: number,
+    totalVideoDurationSeconds: number,
+    isMuted: boolean,
+  ) {
     this.stop()
-    if (!music.audioBuffer || totalDuration <= 0) return
+    if (!music.audioBuffer || totalVideoDurationSeconds <= 0) return
 
-    const ctx = getAudioContext()
-    if (ctx.state === 'suspended') {
-      void ctx.resume()
+    const audioContext = getAudioContext()
+    if (audioContext.state === 'suspended') {
+      void audioContext.resume()
     }
 
     const buffer = music.audioBuffer
-    const startOffset = Math.min(music.startOffset, Math.max(0, buffer.duration - 0.1))
-    const playableTrackDuration = Math.max(0.1, buffer.duration - startOffset)
+    const { clampedStartOffsetSeconds, playableTrackDurationSeconds } =
+      computePlayableTrackBounds(buffer, music.startOffset)
 
-    if (!music.loop && timelineTime >= playableTrackDuration) {
+    if (!music.loop && timelineTimeSeconds >= playableTrackDurationSeconds) {
       return
     }
 
-    const source = ctx.createBufferSource()
-    source.buffer = buffer
-    source.loop = music.loop
-    if (music.loop) {
-      source.loopStart = startOffset
-      source.loopEnd = buffer.duration
-    }
+    const sourceNode = audioContext.createBufferSource()
+    configureLoopingAudioSource(sourceNode, buffer, clampedStartOffsetSeconds, music.loop)
 
-    const gain = ctx.createGain()
-    const targetVol = muted ? 0 : music.volume
-    const now = ctx.currentTime
-    const remainingVideo = Math.max(0.05, totalDuration - timelineTime)
+    const gainNode = audioContext.createGain()
+    const targetVolume = isMuted ? 0 : Math.max(0, Math.min(1, music.volume))
+    const audioContextNow = audioContext.currentTime
 
-    gain.gain.setValueAtTime(targetVol, now)
+    scheduleAudioFadeEnvelope(gainNode.gain, {
+      targetVolume,
+      timelineStartTimeSeconds: timelineTimeSeconds,
+      totalVideoDurationSeconds,
+      audioContextStartTime: audioContextNow,
+      fadeInEnabled: music.fadeIn,
+      fadeOutEnabled: music.fadeOut,
+    })
 
-    // Apply fade-in if starting near the beginning
-    if (music.fadeIn && timelineTime < 1.5 && !muted) {
-      const fadeLeft = 1.5 - timelineTime
-      const currentRatio = timelineTime / 1.5
-      gain.gain.setValueAtTime(targetVol * currentRatio, now)
-      gain.gain.linearRampToValueAtTime(targetVol, now + fadeLeft)
-    }
+    sourceNode.connect(gainNode)
+    gainNode.connect(audioContext.destination)
 
-    // Apply fade-out near the end of the video
-    if (music.fadeOut && !muted) {
-      const fadeDur = Math.min(2.5, totalDuration * 0.25)
-      const fadeStartInVideo = totalDuration - fadeDur
-      if (timelineTime >= fadeStartInVideo) {
-        const ratio = Math.max(0, (totalDuration - timelineTime) / fadeDur)
-        gain.gain.setValueAtTime(targetVol * ratio, now)
-        gain.gain.linearRampToValueAtTime(0, now + remainingVideo)
-      } else {
-        const delayToFade = fadeStartInVideo - timelineTime
-        gain.gain.setValueAtTime(targetVol, now + delayToFade)
-        gain.gain.linearRampToValueAtTime(0, now + remainingVideo)
-      }
-    }
+    const trackPlaybackOffsetSeconds = music.loop
+      ? clampedStartOffsetSeconds + (timelineTimeSeconds % playableTrackDurationSeconds)
+      : clampedStartOffsetSeconds + timelineTimeSeconds
+    const remainingVideoSeconds = Math.max(0.05, totalVideoDurationSeconds - timelineTimeSeconds)
 
-    source.connect(gain)
-    gain.connect(ctx.destination)
-
-    const offsetInTrack = music.loop
-      ? startOffset + (timelineTime % playableTrackDuration)
-      : startOffset + timelineTime
-
-    source.start(now, offsetInTrack, remainingVideo)
-    this.source = source
-    this.gainNode = gain
+    sourceNode.start(audioContextNow, trackPlaybackOffsetSeconds, remainingVideoSeconds)
+    this.activeSourceNode = sourceNode
+    this.activeGainNode = gainNode
   }
 
-  setVolume(volume: number, muted: boolean) {
-    if (this.gainNode) {
-      const ctx = getAudioContext()
-      this.gainNode.gain.setTargetAtTime(muted ? 0 : volume, ctx.currentTime, 0.03)
+  setVolume(volume: number, isMuted: boolean) {
+    if (this.activeGainNode) {
+      const audioContext = getAudioContext()
+      const targetVolume = isMuted ? 0 : Math.max(0, Math.min(1, volume))
+      this.activeGainNode.gain.setTargetAtTime(targetVolume, audioContext.currentTime, 0.03)
     }
   }
 }
 
 /**
- * Renders the final mixed stereo AudioBuffer for MP4/WebM export using OfflineAudioContext.
+ * Renders the final mixed stereo `AudioBuffer` for MP4/WebM export using `OfflineAudioContext`.
  */
 export async function renderExportAudioBuffer(
   music: MusicConfig,
-  totalDuration: number,
-  sampleRate = 48000,
+  totalVideoDurationSeconds: number,
+  sampleRateHz = 48000,
 ): Promise<AudioBuffer | null> {
-  if (!music.audioBuffer || totalDuration <= 0) return null
+  if (!music.audioBuffer || totalVideoDurationSeconds <= 0) return null
 
-  const totalFrames = Math.ceil(totalDuration * sampleRate)
-  const offline = new OfflineAudioContext(2, totalFrames, sampleRate)
+  const totalSampleFrames = Math.ceil(totalVideoDurationSeconds * sampleRateHz)
+  const offlineContext = new OfflineAudioContext(2, totalSampleFrames, sampleRateHz)
 
   const buffer = music.audioBuffer
-  const startOffset = Math.min(music.startOffset, Math.max(0, buffer.duration - 0.1))
+  const { clampedStartOffsetSeconds, playableTrackDurationSeconds } =
+    computePlayableTrackBounds(buffer, music.startOffset)
 
-  const source = offline.createBufferSource()
-  source.buffer = buffer
-  source.loop = music.loop
-  if (music.loop) {
-    source.loopStart = startOffset
-    source.loopEnd = buffer.duration
-  }
+  const sourceNode = offlineContext.createBufferSource()
+  configureLoopingAudioSource(sourceNode, buffer, clampedStartOffsetSeconds, music.loop)
 
-  const gain = offline.createGain()
-  const vol = Math.max(0, Math.min(1, music.volume))
-  gain.gain.setValueAtTime(vol, 0)
+  const gainNode = offlineContext.createGain()
+  const targetVolume = Math.max(0, Math.min(1, music.volume))
 
-  if (music.fadeIn) {
-    const fadeInDur = Math.min(1.5, totalDuration * 0.25)
-    gain.gain.setValueAtTime(0, 0)
-    gain.gain.linearRampToValueAtTime(vol, fadeInDur)
-  }
+  scheduleAudioFadeEnvelope(gainNode.gain, {
+    targetVolume,
+    timelineStartTimeSeconds: 0,
+    totalVideoDurationSeconds,
+    audioContextStartTime: 0,
+    fadeInEnabled: music.fadeIn,
+    fadeOutEnabled: music.fadeOut,
+  })
 
-  if (music.fadeOut) {
-    const fadeOutDur = Math.min(2.5, totalDuration * 0.25)
-    const fadeOutStart = Math.max(0, totalDuration - fadeOutDur)
-    gain.gain.setValueAtTime(vol, fadeOutStart)
-    gain.gain.linearRampToValueAtTime(0, totalDuration)
-  }
+  sourceNode.connect(gainNode)
+  gainNode.connect(offlineContext.destination)
 
-  source.connect(gain)
-  gain.connect(offline.destination)
+  const playbackDurationSeconds = music.loop
+    ? totalVideoDurationSeconds
+    : Math.min(totalVideoDurationSeconds, playableTrackDurationSeconds)
 
-  const playLen = music.loop
-    ? totalDuration
-    : Math.min(totalDuration, Math.max(0.05, buffer.duration - startOffset))
-
-  source.start(0, startOffset, playLen)
-  return await offline.startRendering()
+  sourceNode.start(0, clampedStartOffsetSeconds, playbackDurationSeconds)
+  return await offlineContext.startRendering()
 }
