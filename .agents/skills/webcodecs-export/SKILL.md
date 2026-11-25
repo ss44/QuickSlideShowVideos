@@ -14,7 +14,9 @@ description: Guide for maintaining and extending the client-side WebCodecs MP4/W
 ## Pipeline Overview
 
 1. **Dimension Alignment:** H.264 and VP9 encoders require even dimensions (`width - (width % 2)`).
-2. **Codec Probing (`pickVideoCodec`):** Probes `VideoEncoder.isConfigSupported()` from High profile down to Baseline (for MP4) or VP9 -> VP8 (for WebM) so exports succeed across Chrome, Edge, Safari, and Firefox.
+2. **Codec Probing (`pickVideoCodec` & `pickAudioCodec`):**
+   - Probes `VideoEncoder.isConfigSupported()` with `latencyMode: 'realtime'` (disables out-of-order B-frame reordering required by `mp4-muxer`) from High profile down to Baseline (for MP4) or VP9 -> VP8 (for WebM).
+   - For MP4 audio, probes `mp4a.40.2` (AAC) first and falls back to `opus` (`mp4-muxer` supports Opus in MP4) so exports retain audio even on Linux Chromium builds without a native AAC encoder.
 3. **Audio Mixing & Encoding:**
    - Uses `renderExportAudioBuffer()` (`OfflineAudioContext`) to bake volume, looping, start offset, and fade-in/out into stereo 48 kHz PCM.
    - Encodes PCM in `4096`-sample chunks using `format: 'f32-planar'` (channel 0 followed by channel 1 in a single `Float32Array`).

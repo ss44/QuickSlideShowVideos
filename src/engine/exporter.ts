@@ -45,6 +45,7 @@ async function pickVideoCodec(
         height,
         bitrate,
         framerate: fps,
+        latencyMode: 'realtime',
       })
       if (support.supported) {
         return cand
@@ -62,31 +63,38 @@ async function pickVideoCodec(
 async function pickAudioCodec(
   format: 'mp4' | 'webm',
   sampleRate: number,
-): Promise<{ codec: string; muxerCodec: 'aac' | 'A_OPUS' } | null> {
+): Promise<{ codec: string; muxerCodec: 'aac' | 'opus' | 'A_OPUS' } | null> {
   if (typeof AudioEncoder === 'undefined' || typeof AudioData === 'undefined') {
     return null
   }
-  const cand =
+  // MP4 prefers AAC for widest player support, falling back to Opus (supported by mp4-muxer)
+  // when AAC AudioEncoder is unavailable (e.g. Linux Chromium).
+  const candidates: Array<{ codec: string; muxerCodec: 'aac' | 'opus' | 'A_OPUS' }> =
     format === 'mp4'
-      ? ({ codec: 'mp4a.40.2', muxerCodec: 'aac' } as const)
-      : ({ codec: 'opus', muxerCodec: 'A_OPUS' } as const)
+      ? [
+          { codec: 'mp4a.40.2', muxerCodec: 'aac' },
+          { codec: 'opus', muxerCodec: 'opus' },
+        ]
+      : [{ codec: 'opus', muxerCodec: 'A_OPUS' }]
 
-  try {
-    const support = await AudioEncoder.isConfigSupported({
-      codec: cand.codec,
-      numberOfChannels: 2,
-      sampleRate,
-      bitrate: 160_000,
-    })
-    if (support.supported) return cand
-  } catch {
-    // ignore
+  for (const cand of candidates) {
+    try {
+      const support = await AudioEncoder.isConfigSupported({
+        codec: cand.codec,
+        numberOfChannels: 2,
+        sampleRate,
+        bitrate: 160_000,
+      })
+      if (support.supported) return cand
+    } catch {
+      // try next
+    }
   }
   return null
 }
 
-function yieldToMain(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0))
+function yieldToMain(ms = 0): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 export async function exportSlideshowVideo(params: {
@@ -166,7 +174,7 @@ export async function exportSlideshowVideo(params: {
         audio:
           renderedAudio && audioCodecInfo
             ? {
-                codec: 'aac',
+                codec: audioCodecInfo.muxerCodec === 'opus' ? 'opus' : 'aac',
                 numberOfChannels: 2,
                 sampleRate,
               }
@@ -201,8 +209,12 @@ export async function exportSlideshowVideo(params: {
 
   const videoEncoder = new VideoEncoder({
     output: (chunk, meta) => {
-      if (mp4Muxer) mp4Muxer.addVideoChunk(chunk, meta)
-      if (webmMuxer) webmMuxer.addVideoChunk(chunk, meta)
+      try {
+        if (mp4Muxer) mp4Muxer.addVideoChunk(chunk, meta)
+        if (webmMuxer) webmMuxer.addVideoChunk(chunk, meta)
+      } catch (err) {
+        encoderError = err instanceof Error ? err : new Error(String(err))
+      }
     },
     error: (err) => {
       encoderError = err instanceof Error ? err : new Error(String(err))
@@ -215,6 +227,7 @@ export async function exportSlideshowVideo(params: {
     height,
     bitrate,
     framerate: fps,
+    latencyMode: 'realtime',
     avc: isMp4 ? { format: 'avc' } : undefined,
   })
 
@@ -223,8 +236,12 @@ export async function exportSlideshowVideo(params: {
   if (renderedAudio && audioCodecInfo) {
     audioEncoder = new AudioEncoder({
       output: (chunk, meta) => {
-        if (mp4Muxer) mp4Muxer.addAudioChunk(chunk, meta)
-        if (webmMuxer) webmMuxer.addAudioChunk(chunk, meta)
+        try {
+          if (mp4Muxer) mp4Muxer.addAudioChunk(chunk, meta)
+          if (webmMuxer) webmMuxer.addAudioChunk(chunk, meta)
+        } catch (err) {
+          encoderError = err instanceof Error ? err : new Error(String(err))
+        }
       },
       error: (err) => {
         encoderError = err instanceof Error ? err : new Error(String(err))
@@ -269,8 +286,13 @@ export async function exportSlideshowVideo(params: {
       audioEncoder.encode(audioData)
       audioData.close()
 
-      while (audioEncoder.encodeQueueSize > 16) {
-        await yieldToMain()
+      while (
+        audioEncoder.encodeQueueSize > 16 &&
+        !signal.aborted &&
+        !encoderError &&
+        audioEncoder.state === 'configured'
+      ) {
+        await yieldToMain(5)
       }
     }
 
@@ -346,8 +368,13 @@ export async function exportSlideshowVideo(params: {
       videoFrame.close()
 
       // Backpressure so browser memory never spikes
-      while (videoEncoder.encodeQueueSize > 8) {
-        await yieldToMain()
+      while (
+        videoEncoder.encodeQueueSize > 12 &&
+        !signal.aborted &&
+        !encoderError &&
+        videoEncoder.state === 'configured'
+      ) {
+        await yieldToMain(8)
       }
 
       const now = performance.now()
