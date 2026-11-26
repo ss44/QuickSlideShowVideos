@@ -1,6 +1,13 @@
 @import "tailwindcss";
 
 @layer base {
+  html,
+  body,
+  #app {
+    height: 100%;
+    overscroll-behavior: none;
+  }
+
   * {
     scrollbar-width: thin;
     scrollbar-color: #3f3f46 transparent;
@@ -22,6 +29,13 @@
 
   *::-webkit-scrollbar-thumb:hover {
     background-color: #52525b;
+  }
+
+  button,
+  a,
+  input[type='range'],
+  input[type='checkbox'] {
+    touch-action: manipulation;
   }
 }
 

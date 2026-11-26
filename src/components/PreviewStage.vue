@@ -55,9 +55,11 @@ const emit = defineEmits<{
 }>()
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
+const canvasViewportRef = ref<HTMLElement | null>(null)
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const folderInputRef = ref<HTMLInputElement | null>(null)
 const isDraggingOver = ref(false)
+const canvasViewportSize = ref({ width: 0, height: 0 })
 
 const renderer = new SlideshowRenderer()
 const bitmapCache = new BitmapCache(12, 1280)
@@ -66,6 +68,7 @@ const audioPlayer = new PreviewAudioPlayer()
 let animationFrameId: number | null = null
 let previousFrameWallTimeMs = 0
 let playbackClockSeconds = 0
+let viewportResizeObserver: ResizeObserver | null = null
 
 /**
  * Scales the preview canvas internal resolution to at most 960px on its longest side
@@ -82,9 +85,60 @@ const previewCanvasDimensions = computed(() => {
   }
 })
 
-const aspectRatioStyle = computed(() => ({
-  aspectRatio: `${props.output.width} / ${props.output.height}`,
-}))
+/**
+ * Computes exact aspect-ratio-fitted pixel dimensions inside the available stage viewport
+ * so 16:9, 9:16, 1:1, and 4:5 frames never clip or stretch on portrait mobile screens.
+ */
+const stageFrameStyle = computed(() => {
+  const { width: availableWidth, height: availableHeight } = canvasViewportSize.value
+  if (availableWidth <= 0 || availableHeight <= 0) {
+    return {
+      aspectRatio: `${props.output.width} / ${props.output.height}`,
+      width: '100%',
+      maxHeight: '100%',
+    }
+  }
+
+  const outputAspectRatio = props.output.width / props.output.height
+  const viewportAspectRatio = availableWidth / availableHeight
+
+  if (viewportAspectRatio > outputAspectRatio) {
+    const fittedHeight = Math.floor(availableHeight)
+    const fittedWidth = Math.floor(fittedHeight * outputAspectRatio)
+    return { width: `${fittedWidth}px`, height: `${fittedHeight}px` }
+  }
+
+  const fittedWidth = Math.floor(availableWidth)
+  const fittedHeight = Math.floor(fittedWidth / outputAspectRatio)
+  return { width: `${fittedWidth}px`, height: `${fittedHeight}px` }
+})
+
+watch(canvasViewportRef, (viewportElement) => {
+  viewportResizeObserver?.disconnect()
+  viewportResizeObserver = null
+
+  if (!viewportElement) {
+    canvasViewportSize.value = { width: 0, height: 0 }
+    return
+  }
+
+  const updateMeasuredSize = (width: number, height: number) => {
+    canvasViewportSize.value = { width, height }
+  }
+
+  const initialRect = viewportElement.getBoundingClientRect()
+  updateMeasuredSize(initialRect.width, initialRect.height)
+
+  if (typeof ResizeObserver !== 'undefined') {
+    viewportResizeObserver = new ResizeObserver((entries) => {
+      const entry = entries[0]
+      if (entry) {
+        updateMeasuredSize(entry.contentRect.width, entry.contentRect.height)
+      }
+    })
+    viewportResizeObserver.observe(viewportElement)
+  }
+})
 
 const timelineProgressPercent = computed(() => {
   if (props.timeline.totalDuration <= 0) return 0
@@ -303,6 +357,8 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  viewportResizeObserver?.disconnect()
+  viewportResizeObserver = null
   stopPlayback()
   bitmapCache.clear()
 })
@@ -312,7 +368,7 @@ defineExpose({ openFilePicker, clearBitmapCache })
 
 <template>
   <section
-    class="relative flex min-h-0 flex-1 flex-col items-center justify-center overflow-hidden bg-zinc-950 p-4 select-none"
+    class="relative flex min-h-0 flex-1 flex-col items-center justify-center overflow-hidden bg-zinc-950 p-2.5 select-none sm:p-4"
     @dragover="onDragOver"
     @dragleave="onDragLeave"
     @drop="onDrop"
@@ -339,110 +395,118 @@ defineExpose({ openFilePicker, clearBitmapCache })
     <!-- Empty Drop State -->
     <div
       v-if="props.slides.length === 0"
-      class="flex w-full max-w-xl flex-col items-center justify-center rounded-2xl border-2 border-dashed px-8 py-14 text-center transition"
-      :class="
-        isDraggingOver
-          ? 'border-indigo-400 bg-indigo-500/10 scale-[1.01]'
-          : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700'
-      "
+      class="flex h-full w-full items-center justify-center overflow-y-auto overscroll-contain"
     >
       <div
-        class="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-indigo-500/10 text-indigo-400 ring-1 ring-indigo-500/20"
+        class="my-auto flex w-full max-w-xl flex-col items-center justify-center rounded-2xl border-2 border-dashed px-4 py-6 text-center transition sm:px-8 sm:py-14"
+        :class="
+          isDraggingOver
+            ? 'border-indigo-400 bg-indigo-500/10 scale-[1.01]'
+            : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700'
+        "
       >
-        <Upload class="h-7 w-7" />
-      </div>
-      <h2 class="text-lg font-semibold text-zinc-100">Drop your photos here</h2>
-      <p class="mt-1.5 max-w-sm text-sm text-zinc-400">
-        Drag in dozens or hundreds of images—or an entire folder. Everything runs locally in your
-        browser with zero uploads.
-      </p>
-
-      <div class="mt-6 flex flex-wrap items-center justify-center gap-3">
-        <button
-          type="button"
-          class="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm shadow-indigo-600/25 transition hover:bg-indigo-500"
-          @click="openFilePicker"
+        <div
+          class="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-indigo-500/10 text-indigo-400 ring-1 ring-indigo-500/20 sm:mb-4 sm:h-14 sm:w-14"
         >
-          <Upload class="h-4 w-4" />
-          Choose Photos
-        </button>
-        <button
-          type="button"
-          class="inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2.5 text-sm font-medium text-zinc-200 transition hover:bg-zinc-800"
-          @click="openFolderPicker"
-        >
-          <FolderOpen class="h-4 w-4" />
-          Choose Folder
-        </button>
-      </div>
+          <Upload class="h-6 w-6 sm:h-7 sm:w-7" />
+        </div>
+        <h2 class="text-base font-semibold text-zinc-100 sm:text-lg">Drop your photos here</h2>
+        <p class="mt-1 max-w-sm text-xs text-zinc-400 sm:mt-1.5 sm:text-sm">
+          Drag in dozens or hundreds of images—or an entire folder. Everything runs locally in your
+          browser with zero uploads.
+        </p>
 
-      <div class="mt-6 flex items-center gap-1.5 text-xs text-zinc-500">
-        <Sparkles class="h-3.5 w-3.5 text-indigo-400" />
-        <span>Supports JPG, PNG, WebP, AVIF · Instant preview · Direct MP4 export</span>
-      </div>
-
-      <!-- Recent Saved Projects Quick-Reopen Strip -->
-      <div
-        v-if="props.savedProjects.length > 0"
-        class="mt-6 w-full border-t border-zinc-800/80 pt-5 text-left"
-      >
-        <div class="mb-2.5 flex items-center justify-between text-xs">
-          <span class="font-medium text-zinc-300">Recent Saved Projects</span>
+        <div class="mt-4 flex flex-wrap items-center justify-center gap-2.5 sm:mt-6 sm:gap-3">
           <button
             type="button"
-            class="text-indigo-400 transition hover:text-indigo-300"
-            @click="emit('openProjectsModal')"
+            class="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3.5 py-2 text-xs font-medium text-white shadow-sm shadow-indigo-600/25 transition hover:bg-indigo-500 sm:px-4 sm:py-2.5 sm:text-sm"
+            @click="openFilePicker"
           >
-            Manage all ({{ props.savedProjects.length }})
+            <Upload class="h-4 w-4" />
+            Choose Photos
+          </button>
+          <button
+            type="button"
+            class="inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-3.5 py-2 text-xs font-medium text-zinc-200 transition hover:bg-zinc-800 sm:px-4 sm:py-2.5 sm:text-sm"
+            @click="openFolderPicker"
+          >
+            <FolderOpen class="h-4 w-4" />
+            Choose Folder
           </button>
         </div>
 
-        <div class="grid grid-cols-1 gap-2 sm:grid-cols-3">
-          <button
-            v-for="project in props.savedProjects.slice(0, 3)"
-            :key="project.id"
-            type="button"
-            :disabled="props.openingProjectId !== null"
-            class="group flex items-center gap-2.5 rounded-xl border border-zinc-800 bg-zinc-900/70 p-2 text-left transition hover:border-indigo-500/60 hover:bg-zinc-900 disabled:opacity-60"
-            @click="emit('openSavedProject', project.id)"
-          >
-            <div
-              class="flex h-10 w-12 shrink-0 items-center justify-center overflow-hidden rounded-md border border-zinc-800 bg-zinc-950"
+        <div
+          class="mt-4 flex items-center justify-center gap-1.5 text-[11px] text-zinc-500 sm:mt-6 sm:text-xs"
+        >
+          <Sparkles class="h-3.5 w-3.5 shrink-0 text-indigo-400" />
+          <span>Supports JPG, PNG, WebP, AVIF · Instant preview · Direct MP4 export</span>
+        </div>
+
+        <!-- Recent Saved Projects Quick-Reopen Strip -->
+        <div
+          v-if="props.savedProjects.length > 0"
+          class="mt-5 w-full border-t border-zinc-800/80 pt-4 text-left sm:mt-6 sm:pt-5"
+        >
+          <div class="mb-2.5 flex items-center justify-between text-xs">
+            <span class="font-medium text-zinc-300">Recent Saved Projects</span>
+            <button
+              type="button"
+              class="text-indigo-400 transition hover:text-indigo-300"
+              @click="emit('openProjectsModal')"
             >
-              <Loader2
-                v-if="props.openingProjectId === project.id"
-                class="h-4 w-4 animate-spin text-indigo-400"
-              />
-              <img
-                v-else-if="project.coverThumbnailUrl"
-                :src="project.coverThumbnailUrl"
-                :alt="project.name"
-                class="h-full w-full object-cover"
-              />
-              <Images v-else class="h-4 w-4 text-zinc-600" />
-            </div>
-            <div class="min-w-0 flex-1">
-              <div class="truncate text-xs font-medium text-zinc-100 group-hover:text-indigo-200">
-                {{ project.name }}
+              Manage all ({{ props.savedProjects.length }})
+            </button>
+          </div>
+
+          <div class="grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <button
+              v-for="project in props.savedProjects.slice(0, 3)"
+              :key="project.id"
+              type="button"
+              :disabled="props.openingProjectId !== null"
+              class="group flex items-center gap-2.5 rounded-xl border border-zinc-800 bg-zinc-900/70 p-2 text-left transition hover:border-indigo-500/60 hover:bg-zinc-900 disabled:opacity-60"
+              @click="emit('openSavedProject', project.id)"
+            >
+              <div
+                class="flex h-10 w-12 shrink-0 items-center justify-center overflow-hidden rounded-md border border-zinc-800 bg-zinc-950"
+              >
+                <Loader2
+                  v-if="props.openingProjectId === project.id"
+                  class="h-4 w-4 animate-spin text-indigo-400"
+                />
+                <img
+                  v-else-if="project.coverThumbnailUrl"
+                  :src="project.coverThumbnailUrl"
+                  :alt="project.name"
+                  class="h-full w-full object-cover"
+                />
+                <Images v-else class="h-4 w-4 text-zinc-600" />
               </div>
-              <div class="mt-0.5 truncate text-[10px] text-zinc-500">
-                {{ project.slideCount }} {{ project.slideCount === 1 ? 'photo' : 'photos' }} ·
-                {{ formatRelativeTimestamp(project.updatedAt) }}
+              <div class="min-w-0 flex-1">
+                <div class="truncate text-xs font-medium text-zinc-100 group-hover:text-indigo-200">
+                  {{ project.name }}
+                </div>
+                <div class="mt-0.5 truncate text-[10px] text-zinc-500">
+                  {{ project.slideCount }} {{ project.slideCount === 1 ? 'photo' : 'photos' }} ·
+                  {{ formatRelativeTimestamp(project.updatedAt) }}
+                </div>
               </div>
-            </div>
-          </button>
+            </button>
+          </div>
         </div>
       </div>
     </div>
 
     <!-- Preview Stage (When Photos Are Loaded) -->
-    <div v-else class="flex h-full min-h-0 w-full flex-col items-center justify-between gap-3">
+    <div v-else class="flex h-full min-h-0 w-full flex-col items-center justify-between gap-2.5 sm:gap-3">
       <!-- Canvas Container -->
-      <div class="relative flex min-h-0 w-full flex-1 items-center justify-center">
+      <div
+        ref="canvasViewportRef"
+        class="relative flex min-h-0 w-full flex-1 items-center justify-center overflow-hidden"
+      >
         <div
-          class="relative max-h-full max-w-full overflow-hidden rounded-xl bg-black shadow-2xl shadow-black/70 ring-1 ring-zinc-800"
-          :style="aspectRatioStyle"
-          style="height: 100%; width: auto"
+          class="relative overflow-hidden rounded-xl bg-black shadow-2xl shadow-black/70 ring-1 ring-zinc-800"
+          :style="stageFrameStyle"
         >
           <canvas
             ref="canvasRef"
@@ -452,7 +516,7 @@ defineExpose({ openFilePicker, clearBitmapCache })
 
           <!-- Top-left status pill -->
           <div
-            class="pointer-events-none absolute top-3 left-3 flex items-center gap-2 rounded-md bg-black/60 px-2.5 py-1 text-[11px] font-medium text-zinc-200 backdrop-blur-sm"
+            class="pointer-events-none absolute top-2 left-2 flex items-center gap-1.5 rounded-md bg-black/65 px-2 py-0.5 text-[10px] font-medium text-zinc-200 backdrop-blur-sm sm:top-3 sm:left-3 sm:gap-2 sm:px-2.5 sm:py-1 sm:text-[11px]"
           >
             <span>Slide {{ props.activeSlideIndex + 1 }} / {{ props.slides.length }}</span>
             <span class="text-zinc-500">·</span>
@@ -463,20 +527,26 @@ defineExpose({ openFilePicker, clearBitmapCache })
 
       <!-- Playback Controls Bar -->
       <div
-        class="flex w-full max-w-3xl shrink-0 flex-col gap-2 rounded-xl border border-zinc-800/80 bg-zinc-900/80 px-4 py-2.5 backdrop-blur"
+        class="flex w-full max-w-3xl shrink-0 flex-col gap-1.5 rounded-xl border border-zinc-800/80 bg-zinc-900/80 px-3 py-2 backdrop-blur sm:gap-2 sm:px-4 sm:py-2.5"
       >
-        <!-- Scrubber -->
-        <div class="relative flex items-center gap-3">
-          <span class="w-11 shrink-0 font-mono text-[11px] text-zinc-400">
+        <!-- Scrubber (generous 28px touch target with crisp visual track and non-clipping full timers) -->
+        <div class="relative flex items-center gap-2.5 sm:gap-3">
+          <span
+            class="min-w-[2.5rem] shrink-0 font-mono text-[11px] whitespace-nowrap tabular-nums text-zinc-300"
+          >
             {{ formatTime(props.currentTime) }}
           </span>
-          <div class="relative flex flex-1 items-center">
+          <div class="relative flex h-7 flex-1 items-center">
             <div class="h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
               <div
                 class="h-full rounded-full bg-indigo-500 transition-[width] duration-75"
                 :style="{ width: `${timelineProgressPercent}%` }"
               />
             </div>
+            <div
+              class="pointer-events-none absolute h-3 w-3 -translate-x-1/2 rounded-full bg-white shadow ring-2 ring-indigo-500 transition-[left] duration-75"
+              :style="{ left: `${timelineProgressPercent}%` }"
+            />
             <input
               type="range"
               min="0"
@@ -488,18 +558,21 @@ defineExpose({ openFilePicker, clearBitmapCache })
               @input="onScrubberInput"
             />
           </div>
-          <span class="w-11 shrink-0 text-right font-mono text-[11px] text-zinc-400">
+          <span
+            class="min-w-[2.5rem] shrink-0 text-right font-mono text-[11px] whitespace-nowrap tabular-nums text-zinc-300"
+          >
             {{ formatTime(props.timeline.totalDuration) }}
           </span>
         </div>
 
-        <!-- Transport Buttons -->
-        <div class="flex items-center justify-between">
-          <div class="flex items-center gap-1 text-xs text-zinc-400">
+        <!-- Transport Buttons (3-column grid keeps Play/Pause centered regardless of track name length) -->
+        <div class="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+          <div class="flex min-w-0 items-center gap-1 text-xs text-zinc-400">
             <button
               type="button"
-              class="rounded-md p-1.5 transition hover:bg-zinc-800 hover:text-zinc-100"
+              class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition hover:bg-zinc-800 hover:text-zinc-100"
               :title="props.isMuted ? 'Unmute' : 'Mute'"
+              :aria-label="props.isMuted ? 'Unmute audio' : 'Mute audio'"
               @click="emit('update:isMuted', !props.isMuted)"
             >
               <VolumeX v-if="props.isMuted || !props.music.audioBuffer" class="h-4 w-4" />
@@ -507,18 +580,19 @@ defineExpose({ openFilePicker, clearBitmapCache })
             </button>
             <span
               v-if="props.music.audioBuffer"
-              class="max-w-[180px] truncate text-[11px] text-zinc-400"
+              class="min-w-0 truncate text-[11px] text-zinc-400"
             >
               {{ props.music.name }}
             </span>
-            <span v-else class="text-[11px] text-zinc-500">No audio</span>
+            <span v-else class="hidden truncate text-[11px] text-zinc-500 sm:inline">No audio</span>
           </div>
 
-          <div class="flex items-center gap-1.5">
+          <div class="flex items-center gap-1 sm:gap-1.5">
             <button
               type="button"
-              class="rounded-lg p-1.5 text-zinc-300 transition hover:bg-zinc-800 hover:text-white"
+              class="flex h-8 w-8 items-center justify-center rounded-lg text-zinc-300 transition hover:bg-zinc-800 hover:text-white"
               title="Previous slide (Left Arrow)"
+              aria-label="Previous slide"
               @click="stepToAdjacentSlide(-1)"
             >
               <SkipBack class="h-4 w-4" />
@@ -527,6 +601,7 @@ defineExpose({ openFilePicker, clearBitmapCache })
               type="button"
               class="flex h-9 w-9 items-center justify-center rounded-full bg-indigo-600 text-white shadow-sm shadow-indigo-600/30 transition hover:bg-indigo-500 active:scale-95"
               title="Play / Pause (Space)"
+              :aria-label="props.isPlaying ? 'Pause slideshow' : 'Play slideshow'"
               @click="togglePlay"
             >
               <Pause v-if="props.isPlaying" class="h-4 w-4 fill-current" />
@@ -534,16 +609,19 @@ defineExpose({ openFilePicker, clearBitmapCache })
             </button>
             <button
               type="button"
-              class="rounded-lg p-1.5 text-zinc-300 transition hover:bg-zinc-800 hover:text-white"
+              class="flex h-8 w-8 items-center justify-center rounded-lg text-zinc-300 transition hover:bg-zinc-800 hover:text-white"
               title="Next slide (Right Arrow)"
+              aria-label="Next slide"
               @click="stepToAdjacentSlide(1)"
             >
               <SkipForward class="h-4 w-4" />
             </button>
           </div>
 
-          <div class="text-right text-[11px] text-zinc-500">
-            {{ props.timeline.effectiveSlideDuration.toFixed(1) }}s / slide
+          <div class="text-right text-[11px] whitespace-nowrap tabular-nums text-zinc-500">
+            {{ props.timeline.effectiveSlideDuration.toFixed(1) }}s<span class="hidden sm:inline">
+              /</span
+            ><span class="sm:hidden">/</span>slide
           </div>
         </div>
       </div>

@@ -153,17 +153,19 @@ function onBackdropClick(event: MouseEvent) {
   <Teleport to="body">
     <div
       v-if="props.open"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-2.5 backdrop-blur-sm sm:p-4"
       role="dialog"
       aria-modal="true"
       aria-label="Local Saved Projects"
       @click="onBackdropClick"
     >
       <div
-        class="flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl"
+        class="flex max-h-[90dvh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl"
       >
         <!-- Header -->
-        <div class="flex items-start justify-between border-b border-zinc-800/80 px-6 py-4">
+        <div
+          class="flex items-start justify-between gap-3 border-b border-zinc-800/80 px-4 py-3.5 sm:px-6 sm:py-4"
+        >
           <div>
             <h3 class="flex items-center gap-2 text-base font-semibold text-zinc-100">
               <FolderOpen class="h-4.5 w-4.5 text-indigo-400" />
@@ -176,7 +178,7 @@ function onBackdropClick(event: MouseEvent) {
           <button
             type="button"
             :disabled="props.isSaving || props.isOpeningProjectId !== null"
-            class="rounded-lg p-1 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40"
+            class="rounded-lg p-1.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40"
             aria-label="Close projects dialog"
             @click="emit('close')"
           >
@@ -187,7 +189,7 @@ function onBackdropClick(event: MouseEvent) {
         <!-- Storage Unsupported Notice -->
         <div
           v-if="!props.isStorageSupported"
-          class="m-6 flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-xs text-amber-200"
+          class="m-4 flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-xs text-amber-200 sm:m-6"
         >
           <AlertCircle class="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
           <p class="leading-relaxed">
@@ -198,12 +200,12 @@ function onBackdropClick(event: MouseEvent) {
 
         <template v-else>
           <!-- Save Current Project Section -->
-          <div class="border-b border-zinc-800/80 bg-zinc-900/35 px-6 py-4">
-            <div class="mb-2 flex items-center justify-between">
+          <div class="border-b border-zinc-800/80 bg-zinc-900/35 px-4 py-3.5 sm:px-6 sm:py-4">
+            <div class="mb-2 flex items-center justify-between gap-2">
               <span class="text-xs font-semibold uppercase tracking-wider text-zinc-300">
                 Save Current Workspace
               </span>
-              <span v-if="props.slideCount > 0" class="text-[11px] text-zinc-400">
+              <span v-if="props.slideCount > 0" class="shrink-0 text-[11px] tabular-nums text-zinc-400">
                 {{ props.slideCount }} {{ props.slideCount === 1 ? 'photo' : 'photos' }} ·
                 {{ formatTime(props.totalDuration) }}
               </span>
@@ -221,6 +223,7 @@ function onBackdropClick(event: MouseEvent) {
               class="flex flex-col gap-2.5 sm:flex-row sm:items-center"
               @submit.prevent="submitSave(false)"
             >
+              <!-- text-base on mobile prevents iOS Safari automatic input zoom -->
               <input
                 ref="nameInputRef"
                 v-model="projectNameInput"
@@ -228,14 +231,14 @@ function onBackdropClick(event: MouseEvent) {
                 maxlength="80"
                 :disabled="props.isSaving"
                 placeholder="Project name (e.g. Summer Vacation)"
-                class="min-w-0 flex-1 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:border-indigo-500 focus:outline-none disabled:opacity-60"
+                class="min-w-0 flex-1 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-base text-zinc-100 placeholder-zinc-500 focus:border-indigo-500 focus:outline-none disabled:opacity-60 sm:text-xs"
               />
 
               <div class="flex shrink-0 items-center gap-2">
                 <button
                   type="submit"
                   :disabled="props.isSaving || props.isOpeningProjectId !== null"
-                  class="inline-flex items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-2 text-xs font-semibold text-white shadow-sm shadow-indigo-600/25 transition hover:bg-indigo-500 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+                  class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-2.5 text-xs font-semibold text-white shadow-sm shadow-indigo-600/25 transition hover:bg-indigo-500 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 sm:flex-initial sm:py-2"
                 >
                   <Loader2 v-if="props.isSaving" class="h-3.5 w-3.5 animate-spin" />
                   <Save v-else class="h-3.5 w-3.5" />
@@ -247,7 +250,7 @@ function onBackdropClick(event: MouseEvent) {
                   type="button"
                   :disabled="props.isSaving || props.isOpeningProjectId !== null"
                   title="Save a separate copy as a new project"
-                  class="inline-flex items-center justify-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs font-medium text-zinc-200 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2.5 text-xs font-medium text-zinc-200 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-initial sm:py-2"
                   @click="submitSave(true)"
                 >
                   <CopyPlus class="h-3.5 w-3.5 text-zinc-400" />
@@ -285,7 +288,7 @@ function onBackdropClick(event: MouseEvent) {
           </div>
 
           <!-- Saved Projects List -->
-          <div class="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+          <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3.5 sm:px-6 sm:py-4">
             <div class="mb-3 flex items-center justify-between">
               <span class="text-xs font-semibold uppercase tracking-wider text-zinc-400">
                 Saved in This Browser
@@ -329,99 +332,102 @@ function onBackdropClick(event: MouseEvent) {
                     : 'border-zinc-800/90 bg-zinc-900/45 hover:border-zinc-700'
                 "
               >
-                <div class="flex items-center gap-3.5">
-                  <!-- Cover Thumbnail -->
-                  <div
-                    class="flex h-14 w-20 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950"
-                  >
-                    <img
-                      v-if="project.coverThumbnailUrl"
-                      :src="project.coverThumbnailUrl"
-                      :alt="project.name"
-                      class="h-full w-full object-cover"
-                    />
-                    <Images v-else class="h-5 w-5 text-zinc-600" />
-                  </div>
-
-                  <!-- Project Info -->
-                  <div class="min-w-0 flex-1">
-                    <!-- Inline Rename Mode -->
-                    <form
-                      v-if="editingProjectId === project.id"
-                      class="flex items-center gap-1.5"
-                      @submit.prevent="confirmInlineRename(project.id)"
+                <div class="flex flex-col gap-2.5 sm:flex-row sm:items-center sm:gap-3.5">
+                  <div class="flex min-w-0 flex-1 items-center gap-3">
+                    <!-- Cover Thumbnail -->
+                    <div
+                      class="flex h-12 w-16 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 sm:h-14 sm:w-20"
                     >
-                      <input
-                        v-model="editingProjectName"
-                        type="text"
-                        maxlength="80"
-                        class="min-w-0 flex-1 rounded-md border border-indigo-500 bg-zinc-950 px-2 py-1 text-xs text-zinc-100 focus:outline-none"
-                        @keydown.esc.stop="cancelInlineRename"
+                      <img
+                        v-if="project.coverThumbnailUrl"
+                        :src="project.coverThumbnailUrl"
+                        :alt="project.name"
+                        class="h-full w-full object-cover"
                       />
-                      <button
-                        type="submit"
-                        class="rounded-md bg-indigo-600 p-1 text-white hover:bg-indigo-500"
-                        title="Save name"
-                      >
-                        <Check class="h-3.5 w-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        class="rounded-md border border-zinc-700 bg-zinc-900 p-1 text-zinc-400 hover:text-zinc-200"
-                        title="Cancel rename"
-                        @click="cancelInlineRename"
-                      >
-                        <X class="h-3.5 w-3.5" />
-                      </button>
-                    </form>
-
-                    <!-- Normal Title Row -->
-                    <div v-else class="flex items-center gap-2">
-                      <span class="truncate text-sm font-semibold text-zinc-100">
-                        {{ project.name }}
-                      </span>
-                      <span
-                        v-if="project.id === props.activeProjectId"
-                        class="shrink-0 rounded-full bg-indigo-500/20 px-2 py-0.5 text-[10px] font-medium text-indigo-300"
-                      >
-                        Open
-                      </span>
+                      <Images v-else class="h-5 w-5 text-zinc-600" />
                     </div>
 
-                    <div
-                      class="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-zinc-400"
-                    >
-                      <span class="inline-flex items-center gap-1">
-                        <Images class="h-3 w-3 text-zinc-500" />
-                        {{ project.slideCount }} {{ project.slideCount === 1 ? 'photo' : 'photos' }}
-                      </span>
-                      <span class="inline-flex items-center gap-1 font-mono">
-                        <Clock class="h-3 w-3 text-zinc-500" />
-                        {{ formatTime(project.totalDurationSeconds) }}
-                      </span>
-                      <span class="font-mono text-zinc-500">
-                        {{ formatBytesReadable(project.totalMediaBytes) }}
-                      </span>
-                      <span class="text-zinc-500">
-                        · {{ formatRelativeTimestamp(project.updatedAt) }}
-                      </span>
-                    </div>
+                    <!-- Project Info -->
+                    <div class="min-w-0 flex-1">
+                      <!-- Inline Rename Mode -->
+                      <form
+                        v-if="editingProjectId === project.id"
+                        class="flex items-center gap-1.5"
+                        @submit.prevent="confirmInlineRename(project.id)"
+                      >
+                        <!-- text-base on mobile prevents iOS Safari automatic input zoom -->
+                        <input
+                          v-model="editingProjectName"
+                          type="text"
+                          maxlength="80"
+                          class="min-w-0 flex-1 rounded-md border border-indigo-500 bg-zinc-950 px-2 py-1 text-base text-zinc-100 focus:outline-none sm:text-xs"
+                          @keydown.esc.stop="cancelInlineRename"
+                        />
+                        <button
+                          type="submit"
+                          class="rounded-md bg-indigo-600 p-1.5 text-white hover:bg-indigo-500 sm:p-1"
+                          title="Save name"
+                        >
+                          <Check class="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          class="rounded-md border border-zinc-700 bg-zinc-900 p-1.5 text-zinc-400 hover:text-zinc-200 sm:p-1"
+                          title="Cancel rename"
+                          @click="cancelInlineRename"
+                        >
+                          <X class="h-3.5 w-3.5" />
+                        </button>
+                      </form>
 
-                    <div
-                      v-if="project.hasMusic && project.musicName"
-                      class="mt-1 flex items-center gap-1 text-[11px] text-indigo-300/80"
-                    >
-                      <Music class="h-3 w-3 shrink-0" />
-                      <span class="truncate">{{ project.musicName }}</span>
+                      <!-- Normal Title Row -->
+                      <div v-else class="flex items-center gap-2">
+                        <span class="truncate text-sm font-semibold text-zinc-100">
+                          {{ project.name }}
+                        </span>
+                        <span
+                          v-if="project.id === props.activeProjectId"
+                          class="shrink-0 rounded-full bg-indigo-500/20 px-2 py-0.5 text-[10px] font-medium text-indigo-300"
+                        >
+                          Open
+                        </span>
+                      </div>
+
+                      <div
+                        class="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-zinc-400"
+                      >
+                        <span class="inline-flex items-center gap-1">
+                          <Images class="h-3 w-3 text-zinc-500" />
+                          {{ project.slideCount }} {{ project.slideCount === 1 ? 'photo' : 'photos' }}
+                        </span>
+                        <span class="inline-flex items-center gap-1 font-mono tabular-nums">
+                          <Clock class="h-3 w-3 text-zinc-500" />
+                          {{ formatTime(project.totalDurationSeconds) }}
+                        </span>
+                        <span class="font-mono text-zinc-500">
+                          {{ formatBytesReadable(project.totalMediaBytes) }}
+                        </span>
+                        <span class="text-zinc-500">
+                          · {{ formatRelativeTimestamp(project.updatedAt) }}
+                        </span>
+                      </div>
+
+                      <div
+                        v-if="project.hasMusic && project.musicName"
+                        class="mt-1 flex items-center gap-1 text-[11px] text-indigo-300/80"
+                      >
+                        <Music class="h-3 w-3 shrink-0" />
+                        <span class="truncate">{{ project.musicName }}</span>
+                      </div>
                     </div>
                   </div>
 
                   <!-- Row Actions -->
-                  <div class="flex shrink-0 items-center gap-1.5">
+                  <div class="flex shrink-0 items-center justify-end gap-1.5">
                     <button
                       type="button"
                       :disabled="props.isSaving || props.isOpeningProjectId !== null"
-                      class="inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
+                      class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50 sm:flex-initial sm:py-1.5"
                       :class="
                         pendingOpenConfirmProjectId === project.id
                           ? 'border-amber-500/60 bg-amber-500/20 text-amber-200 hover:bg-amber-500/30'
@@ -447,8 +453,9 @@ function onBackdropClick(event: MouseEvent) {
                     <button
                       type="button"
                       :disabled="props.isSaving || props.isOpeningProjectId !== null"
-                      class="rounded-lg border border-zinc-800 bg-zinc-900 p-1.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40"
+                      class="rounded-lg border border-zinc-800 bg-zinc-900 p-2 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40 sm:p-1.5"
                       title="Rename project"
+                      aria-label="Rename project"
                       @click="startInlineRename(project)"
                     >
                       <Pencil class="h-3.5 w-3.5" />
@@ -457,8 +464,9 @@ function onBackdropClick(event: MouseEvent) {
                     <button
                       type="button"
                       :disabled="props.isSaving || props.isOpeningProjectId !== null"
-                      class="rounded-lg border border-zinc-800 bg-zinc-900 p-1.5 text-zinc-400 transition hover:border-red-500/40 hover:bg-red-950/60 hover:text-red-400 disabled:opacity-40"
+                      class="rounded-lg border border-zinc-800 bg-zinc-900 p-2 text-zinc-400 transition hover:border-red-500/40 hover:bg-red-950/60 hover:text-red-400 disabled:opacity-40 sm:p-1.5"
                       title="Delete saved project"
+                      aria-label="Delete saved project"
                       @click="requestDeleteProject(project.id)"
                     >
                       <Trash2 class="h-3.5 w-3.5" />
@@ -469,9 +477,9 @@ function onBackdropClick(event: MouseEvent) {
                 <!-- Unsaved Changes Open Confirmation Strip -->
                 <div
                   v-if="pendingOpenConfirmProjectId === project.id"
-                  class="mt-2.5 flex items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200"
+                  class="mt-2.5 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200"
                 >
-                  <span>Current slideshow has unsaved changes. Click "Confirm Open" to replace it.</span>
+                  <span>Current slideshow has unsaved changes. Tap "Confirm Open" to replace it.</span>
                   <button
                     type="button"
                     class="shrink-0 font-medium text-zinc-300 hover:text-white"
@@ -484,9 +492,11 @@ function onBackdropClick(event: MouseEvent) {
                 <!-- Delete Confirmation Strip -->
                 <div
                   v-if="pendingDeleteProjectId === project.id"
-                  class="mt-2.5 flex items-center justify-between gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] text-red-200"
+                  class="mt-2.5 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] text-red-200"
                 >
-                  <span>Delete "{{ project.name }}" from local browser storage?</span>
+                  <span class="min-w-0 break-words">
+                    Delete "{{ project.name }}" from local browser storage?
+                  </span>
                   <div class="flex shrink-0 items-center gap-2">
                     <button
                       type="button"
@@ -510,7 +520,7 @@ function onBackdropClick(event: MouseEvent) {
 
           <!-- Footer Storage Status -->
           <div
-            class="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-800/80 bg-zinc-900/35 px-6 py-3 text-[11px] text-zinc-500"
+            class="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-800/80 bg-zinc-900/35 px-4 py-3 text-[11px] text-zinc-500 sm:px-6"
           >
             <div class="flex items-center gap-1.5">
               <HardDrive class="h-3.5 w-3.5 text-zinc-400" />
