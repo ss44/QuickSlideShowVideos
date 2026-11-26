@@ -12,6 +12,7 @@ import type {
 } from '../types/project'
 import { PROJECT_SCHEMA_VERSION } from '../types/project'
 import type { SlideImage } from '../types/slideshow'
+import { sanitizeSlideEffectOverrides } from './slideEffects'
 
 const DATABASE_NAME = 'QuickSlideShowProjectsDB'
 const DATABASE_VERSION = 1
@@ -143,6 +144,7 @@ function toPlainSavedSlideRecord(slide: SlideImage): SavedSlideRecord {
       offsetX: slide.cropPosition.offsetX,
       offsetY: slide.cropPosition.offsetY,
     },
+    effectOverrides: sanitizeSlideEffectOverrides(slide.effectOverrides),
     contentHash: slide.contentHash,
     perceptualFingerprint: slide.perceptualFingerprint
       ? {

@@ -4,6 +4,7 @@ import type {
   OutputConfig,
   PerceptualFingerprint,
   SlideCropPosition,
+  SlideEffectOverrides,
   SlideImage,
   SlideRotationDegrees,
   SmartEffectsConfig,
@@ -24,6 +25,7 @@ export interface SavedSlideRecord {
   height: number
   rotation: SlideRotationDegrees
   cropPosition?: SlideCropPosition
+  effectOverrides?: SlideEffectOverrides
   contentHash: string | null
   perceptualFingerprint: PerceptualFingerprint | null
   sharpnessScore?: number | null

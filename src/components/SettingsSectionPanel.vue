@@ -206,6 +206,11 @@ function submitMusicUrl() {
       <p v-if="props.effects.fitMode === 'cover'" class="mt-1.5 text-[11px] text-zinc-500">
         Drag any photo in the preview to adjust its crop framing.
       </p>
+      <p class="mt-1.5 text-[11px] text-zinc-500">
+        Need something different for one photo? Use
+        <span class="font-medium text-zinc-300">Slide FX</span> under the preview to override
+        framing, motion, or look for just that slide.
+      </p>
     </div>
 
     <!-- Ken Burns -->

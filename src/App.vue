@@ -42,6 +42,8 @@ const {
   rotateSlide,
   setSlideCropPosition,
   resetSlideCropPosition,
+  setSlideEffectOverrides,
+  clearSlideEffectOverrides,
   reorderSlides,
   sortSlides,
   clearAllSlides,
@@ -318,6 +320,8 @@ onBeforeUnmount(() => {
           @update:is-muted="isMuted = $event"
           @update-slide-crop="setSlideCropPosition"
           @reset-slide-crop="resetSlideCropPosition"
+          @update-slide-effect-overrides="setSlideEffectOverrides"
+          @reset-slide-effect-overrides="clearSlideEffectOverrides"
           @add-files="addFiles"
           @dismiss-rejected-files-notice="dismissRejectedFilesNotice"
           @open-saved-project="openSavedProject"

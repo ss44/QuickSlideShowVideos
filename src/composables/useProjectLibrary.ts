@@ -18,6 +18,7 @@ import type {
   TransitionType,
 } from '../types/slideshow'
 import { projectStorageRepository } from '../engine/projectStorage'
+import { serializeSlideEffectOverrides } from '../engine/slideEffects'
 
 const SAVED_BADGE_RESET_DELAY_MS = 2600
 
@@ -302,7 +303,7 @@ export function useProjectLibrary(bindings: ProjectLibraryBindings) {
       bindings.slides.value
         .map(
           (slide) =>
-            `${slide.id}:${slide.rotation}:${slide.cropPosition.offsetX.toFixed(4)}:${slide.cropPosition.offsetY.toFixed(4)}`,
+            `${slide.id}:${slide.rotation}:${slide.cropPosition.offsetX.toFixed(4)}:${slide.cropPosition.offsetY.toFixed(4)}:${serializeSlideEffectOverrides(slide.effectOverrides)}`,
         )
         .join(','),
       bindings.timing.slideDuration,

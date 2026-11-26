@@ -10,6 +10,7 @@ import type {
   TransitionType,
 } from '../types/slideshow'
 import { findSlideIndexAtTime } from './timeline'
+import { resolveSlideEffects } from './slideEffects'
 
 const CANVAS_BACKGROUND_COLOR = '#09090b'
 const BLUR_SCRATCH_DIMENSION_PX = 96
@@ -468,6 +469,9 @@ export class SlideshowRenderer {
     const currentTimelineSlide = timeline.slides[activeTimelineIndex]
     const currentSlideImage = slides[currentTimelineSlide.slideIndex]
     const currentBitmap = currentSlideImage ? getBitmapById(currentSlideImage.id) : null
+    // Per-slide overrides (framing, Ken Burns, color look, vignette) layered over the global settings
+    const currentSlideEffects = resolveSlideEffects(currentSlideImage, effects)
+    let vignetteOpacity = currentSlideEffects.vignette ? 1 : 0
 
     const elapsedInCurrentSlide = Math.max(0, timeSeconds - currentTimelineSlide.startTime)
     const isWithinIncomingTransition =
@@ -481,6 +485,7 @@ export class SlideshowRenderer {
       const previousTimelineSlide = timeline.slides[previousTimelineIndex]
       const previousSlideImage = slides[previousTimelineSlide.slideIndex]
       const previousBitmap = previousSlideImage ? getBitmapById(previousSlideImage.id) : null
+      const previousSlideEffects = resolveSlideEffects(previousSlideImage, effects)
 
       const previousSlideProgress = computeSlideMotionProgress(
         timeline,
@@ -501,7 +506,7 @@ export class SlideshowRenderer {
         previousSlideImage,
         previousTimelineSlide,
         previousSlideProgress,
-        effects,
+        previousSlideEffects,
       )
       this.drawSingleSlide(
         this.incomingScratchCtx,
@@ -511,7 +516,7 @@ export class SlideshowRenderer {
         currentSlideImage,
         currentTimelineSlide,
         currentSlideProgress,
-        effects,
+        currentSlideEffects,
       )
 
       const linearTransitionProgress = Math.max(
@@ -527,6 +532,12 @@ export class SlideshowRenderer {
         currentTimelineSlide.transitionIn,
         easedTransitionProgress,
       )
+
+      // The vignette stays a fixed frame-level overlay (it never slides/pushes with the photo),
+      // so when only one side of a transition has it enabled we fade its strength across the transition.
+      const previousVignetteOpacity = previousSlideEffects.vignette ? 1 : 0
+      vignetteOpacity =
+        previousVignetteOpacity + (vignetteOpacity - previousVignetteOpacity) * easedTransitionProgress
     } else {
       const currentSlideProgress = computeSlideMotionProgress(
         timeline,
@@ -541,12 +552,12 @@ export class SlideshowRenderer {
         currentSlideImage,
         currentTimelineSlide,
         currentSlideProgress,
-        effects,
+        currentSlideEffects,
       )
     }
 
-    if (effects.vignette) {
-      this.renderVignetteOverlay(targetCtx, canvasWidth, canvasHeight)
+    if (vignetteOpacity > 0) {
+      this.renderVignetteOverlay(targetCtx, canvasWidth, canvasHeight, vignetteOpacity)
     }
 
     targetCtx.restore()
@@ -759,7 +770,10 @@ export class SlideshowRenderer {
     targetCtx: CanvasRenderingContext2D,
     canvasWidth: number,
     canvasHeight: number,
+    opacity: number,
   ) {
+    targetCtx.save()
+    targetCtx.globalAlpha = Math.max(0, Math.min(1, opacity))
     const centerX = canvasWidth / 2
     const centerY = canvasHeight / 2
     const cornerRadius = Math.hypot(centerX, centerY)
@@ -775,6 +789,7 @@ export class SlideshowRenderer {
     radialGradient.addColorStop(1, 'rgba(0,0,0,0.48)')
     targetCtx.fillStyle = radialGradient
     targetCtx.fillRect(0, 0, canvasWidth, canvasHeight)
+    targetCtx.restore()
   }
 
   private composeTransition(

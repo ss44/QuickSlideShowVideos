@@ -46,12 +46,30 @@ const RAW_SHARPNESS_SPAN = 0.80
 type SlideResolutionCandidate = Pick<
   SlideImage,
   'id' | 'width' | 'height' | 'rotation' | 'sharpnessScore'
->
+> &
+  Partial<Pick<SlideImage, 'effectOverrides'>>
 type OutputDimensionConfig = Pick<OutputConfig, 'width' | 'height'>
 type FramingEffectsConfig = Pick<
   SmartEffectsConfig,
   'fitMode' | 'kenBurns' | 'kenBurnsIntensity'
 >
+
+/**
+ * Applies a slide's per-slide framing/Ken Burns overrides so upscale analysis matches what the
+ * renderer actually draws for that slide (e.g. a Blur Fill override shrinks the effective upscale).
+ */
+function resolveSlideFramingEffects(
+  slide: SlideResolutionCandidate,
+  effects: FramingEffectsConfig,
+): FramingEffectsConfig {
+  const overrides = slide.effectOverrides
+  if (!overrides) return effects
+  return {
+    fitMode: overrides.fitMode ?? effects.fitMode,
+    kenBurns: overrides.kenBurns ?? effects.kenBurns,
+    kenBurnsIntensity: effects.kenBurnsIntensity,
+  }
+}
 
 let sharedQualityScratchCanvas: HTMLCanvasElement | null = null
 let sharedQualityScratchCtx: CanvasRenderingContext2D | null = null
@@ -471,7 +489,7 @@ export function analyzeSlidesQuality(
   let blurryCount = 0
 
   for (const slide of slides) {
-    const assessment = assessSlideQuality(slide, output, effects)
+    const assessment = assessSlideQuality(slide, output, resolveSlideFramingEffects(slide, effects))
     assessmentBySlideId.set(slide.id, assessment)
 
     if (assessment.issues.length > 0) {

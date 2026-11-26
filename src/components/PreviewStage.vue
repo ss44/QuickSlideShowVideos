@@ -16,6 +16,7 @@ import {
   X,
   Move,
   RotateCcw,
+  SlidersHorizontal,
 } from 'lucide-vue-next'
 import type {
   ComputedTimeline,
@@ -23,6 +24,7 @@ import type {
   MusicConfig,
   OutputConfig,
   SlideCropPosition,
+  SlideEffectOverrides,
   SlideImage,
   SmartEffectsConfig,
 } from '../types/slideshow'
@@ -40,6 +42,13 @@ import {
   computeOrientedImageDimensions,
   hasCustomCropPosition,
 } from '../engine/renderer'
+import {
+  describeSlideEffectOverrides,
+  formatSlideOverrideSummaryLabel,
+  hasSlideEffectOverrides,
+  resolveSlideEffects,
+} from '../engine/slideEffects'
+import SlideEffectsPopover from './SlideEffectsPopover.vue'
 import { PreviewAudioPlayer } from '../engine/audioEngine'
 import { computeSlideSeekTimeSeconds, findSlideIndexAtTime } from '../engine/timeline'
 import { formatRelativeTimestamp, formatTime } from '../utils/formatters'
@@ -72,6 +81,8 @@ const emit = defineEmits<{
   (e: 'update:isMuted', muted: boolean): void
   (e: 'updateSlideCrop', slideId: string, cropPosition: SlideCropPosition): void
   (e: 'resetSlideCrop', slideId: string): void
+  (e: 'updateSlideEffectOverrides', slideId: string, overrides: SlideEffectOverrides): void
+  (e: 'resetSlideEffectOverrides', slideId: string): void
   (e: 'addFiles', files: File[]): void
   (e: 'dismissRejectedFilesNotice'): void
   (e: 'openSavedProject', projectId: string): void
@@ -85,6 +96,8 @@ const folderInputRef = ref<HTMLInputElement | null>(null)
 const isDraggingOver = ref(false)
 const canvasViewportSize = ref({ width: 0, height: 0 })
 const isRepositioningCrop = ref(false)
+const isSlideEffectsPanelOpen = ref(false)
+const slideEffectsControlRef = ref<HTMLElement | null>(null)
 const activeBitmapDimensions = ref<{ slideId: string | null; width: number; height: number }>({
   slideId: null,
   width: 0,
@@ -196,8 +209,28 @@ const activeSlide = computed<SlideImage | null>(() => {
   return props.slides[props.activeSlideIndex] ?? null
 })
 
+/** Global Smart Effects with the active slide's per-slide overrides applied. */
+const activeSlideEffects = computed<SmartEffectsConfig>(() =>
+  resolveSlideEffects(activeSlide.value, props.effects),
+)
+
+const activeSlideHasEffectOverrides = computed(() =>
+  hasSlideEffectOverrides(activeSlide.value?.effectOverrides),
+)
+
+const slideEffectsButtonLabel = computed(() =>
+  formatSlideOverrideSummaryLabel(activeSlide.value?.effectOverrides),
+)
+
+const slideEffectsButtonTitle = computed(() => {
+  const overrideDescription = describeSlideEffectOverrides(activeSlide.value?.effectOverrides)
+  return overrideDescription
+    ? `Effects for this slide only — ${overrideDescription}`
+    : 'Override framing, motion, or look for this slide only'
+})
+
 const activeSlideCoverGeometry = computed(() => {
-  if (props.effects.fitMode !== 'cover' || !activeSlide.value) return null
+  if (!activeSlide.value || activeSlideEffects.value.fitMode !== 'cover') return null
 
   const slide = activeSlide.value
   const hasMatchingBitmapSize =
@@ -466,7 +499,7 @@ function onCanvasPointerMove(event: PointerEvent) {
     props.timeline,
     props.activeSlideIndex,
     playbackClockSeconds,
-    props.effects,
+    activeSlideEffects.value,
   )
 
   const updatedCropPosition = applyDragDeltaToCropPosition({
@@ -512,6 +545,32 @@ function onCanvasClick() {
 function resetActiveSlideCrop() {
   if (!activeSlide.value) return
   emit('resetSlideCrop', activeSlide.value.id)
+}
+
+function toggleSlideEffectsPanel() {
+  isSlideEffectsPanelOpen.value = !isSlideEffectsPanelOpen.value
+}
+
+function closeSlideEffectsPanel() {
+  isSlideEffectsPanelOpen.value = false
+}
+
+function updateActiveSlideEffectOverrides(overrides: SlideEffectOverrides) {
+  if (!activeSlide.value) return
+  emit('updateSlideEffectOverrides', activeSlide.value.id, overrides)
+}
+
+function resetActiveSlideEffectOverrides() {
+  if (!activeSlide.value) return
+  emit('resetSlideEffectOverrides', activeSlide.value.id)
+}
+
+function handleDocumentPointerDown(event: PointerEvent) {
+  if (!isSlideEffectsPanelOpen.value) return
+  const controlElement = slideEffectsControlRef.value
+  if (controlElement && !controlElement.contains(event.target as Node)) {
+    closeSlideEffectsPanel()
+  }
 }
 
 function stepToAdjacentSlide(indexDelta: number) {
@@ -658,11 +717,20 @@ watch(canRepositionActiveSlide, (canReposition) => {
   }
 })
 
+watch(
+  () => props.slides.length,
+  (slideCount) => {
+    if (slideCount === 0) closeSlideEffectsPanel()
+  },
+)
+
 onMounted(() => {
+  document.addEventListener('pointerdown', handleDocumentPointerDown)
   void renderFrameAtTime(props.currentTime)
 })
 
 onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', handleDocumentPointerDown)
   if (clearSuppressedClickTimeoutId !== null) {
     clearTimeout(clearSuppressedClickTimeoutId)
     clearSuppressedClickTimeoutId = null
@@ -1014,10 +1082,50 @@ defineExpose({ openFilePicker, clearBitmapCache })
             </button>
           </div>
 
-          <div class="text-right text-[11px] whitespace-nowrap tabular-nums text-zinc-500">
-            {{ props.timeline.effectiveSlideDuration.toFixed(1) }}s<span class="hidden sm:inline">
-              /</span
-            ><span class="sm:hidden">/</span>slide
+          <div class="flex min-w-0 items-center justify-end gap-1.5 sm:gap-2">
+            <!-- Per-slide effect overrides (applies to the active slide only) -->
+            <div ref="slideEffectsControlRef" class="relative">
+              <button
+                type="button"
+                class="inline-flex h-8 items-center gap-1.5 rounded-md border px-2 text-[11px] font-medium whitespace-nowrap transition"
+                :class="
+                  activeSlideHasEffectOverrides || isSlideEffectsPanelOpen
+                    ? 'border-indigo-500/60 bg-indigo-500/15 text-indigo-200 hover:bg-indigo-500/25'
+                    : 'border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100'
+                "
+                :title="slideEffectsButtonTitle"
+                :aria-label="slideEffectsButtonTitle"
+                :aria-expanded="isSlideEffectsPanelOpen"
+                :disabled="!activeSlide"
+                @click="toggleSlideEffectsPanel"
+              >
+                <SlidersHorizontal class="h-3.5 w-3.5 shrink-0" />
+                <span class="hidden max-w-[7.5rem] truncate sm:inline">{{ slideEffectsButtonLabel }}</span>
+                <span
+                  v-if="activeSlideHasEffectOverrides"
+                  class="h-1.5 w-1.5 shrink-0 rounded-full bg-indigo-400 sm:hidden"
+                  aria-hidden="true"
+                />
+              </button>
+
+              <SlideEffectsPopover
+                v-if="isSlideEffectsPanelOpen && activeSlide"
+                class="absolute right-0 bottom-full z-30 mb-2"
+                :overrides="activeSlide.effectOverrides"
+                :global-effects="props.effects"
+                :slide-number="props.activeSlideIndex + 1"
+                :slide-name="activeSlide.name"
+                @update="updateActiveSlideEffectOverrides"
+                @reset="resetActiveSlideEffectOverrides"
+                @close="closeSlideEffectsPanel"
+              />
+            </div>
+
+            <div class="text-right text-[11px] whitespace-nowrap tabular-nums text-zinc-500">
+              {{ props.timeline.effectiveSlideDuration.toFixed(1) }}s<span class="hidden sm:inline">
+                /</span
+              ><span class="sm:hidden">/</span>slide
+            </div>
           </div>
         </div>
       </div>

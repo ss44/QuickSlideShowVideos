@@ -32,3 +32,10 @@ description: Rules and workflow for modifying Canvas 2D rendering, transitions, 
 - For global color looks, extend `ColorLook` / `COLOR_LOOK_OPTIONS` in `src/types/slideshow.ts` and add the CSS filter string to `COLOR_LOOK_FILTERS` in `src/engine/renderer.ts`.
 - Remember that `ctx.filter` is supported in modern Chromium, Safari, and Firefox; keep filter strings standard CSS filter syntax.
 - For blurred backdrops (`fitMode === 'blur-fill'`), `renderBlurredBackdrop()` renders and blurs directly on the tiny `96×96` `this.blurScratchCanvas` before upscaling with high-quality bilinear smoothing — blurring a full 4K image directly is ~20× slower.
+
+## Per-Slide Effect Overrides
+
+- `SlideImage.effectOverrides` (`SlideEffectOverrides`) can override `fitMode`, `kenBurns`, `colorLook`, and `vignette` for one slide; omitted keys inherit the global `SmartEffectsConfig`.
+- Always resolve effects through `resolveSlideEffects()` / `resolveSlideFitMode()` in `src/engine/slideEffects.ts` — never read `effects.fitMode` directly for a specific slide (renderer, crop-drag geometry, and quality analysis must agree).
+- The vignette remains a frame-level overlay; when only one side of a transition has it, `renderFrame()` fades its opacity across the transition.
+- Persist via `sanitizeSlideEffectOverrides()` so IndexedDB records stay plain and validated.

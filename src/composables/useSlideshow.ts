@@ -5,6 +5,7 @@ import type {
   MusicSourceType,
   OutputConfig,
   SlideCropPosition,
+  SlideEffectOverrides,
   SlideImage,
   SlideRotationDegrees,
   SlideSortMode,
@@ -22,6 +23,7 @@ import type {
 import { RESOLUTION_PRESETS, TRANSITION_OPTIONS } from '../types/slideshow'
 import { thumbnailQueue } from '../engine/imageCache'
 import { clampCropOffset } from '../engine/renderer'
+import { sanitizeSlideEffectOverrides } from '../engine/slideEffects'
 import {
   DEFAULT_DUPLICATE_THRESHOLD_PERCENT,
   DUPLICATE_THRESHOLD_MAX_PERCENT,
@@ -77,6 +79,7 @@ function createSlideImageFromFile(file: File): SlideImage {
     thumbnailUrl: null,
     rotation: 0,
     cropPosition: { offsetX: 0, offsetY: 0 },
+    effectOverrides: {},
     contentHash: null,
     perceptualFingerprint: null,
     sharpnessScore: null,
@@ -335,6 +338,19 @@ export function useSlideshow() {
 
   function resetSlideCropPosition(slideId: string) {
     setSlideCropPosition(slideId, { offsetX: 0, offsetY: 0 })
+  }
+
+  /**
+   * Replaces a single slide's effect overrides without touching the global sequence settings.
+   */
+  function setSlideEffectOverrides(slideId: string, overrides: SlideEffectOverrides) {
+    const targetSlide = slides.value.find((slide) => slide.id === slideId)
+    if (!targetSlide) return
+    targetSlide.effectOverrides = sanitizeSlideEffectOverrides(overrides)
+  }
+
+  function clearSlideEffectOverrides(slideId: string) {
+    setSlideEffectOverrides(slideId, {})
   }
 
   function reorderSlides(fromIndex: number, toIndex: number) {
@@ -601,6 +617,7 @@ export function useSlideshow() {
         offsetX: clampCropOffset(record.cropPosition?.offsetX ?? 0),
         offsetY: clampCropOffset(record.cropPosition?.offsetY ?? 0),
       },
+      effectOverrides: sanitizeSlideEffectOverrides(record.effectOverrides),
       contentHash: record.contentHash ?? null,
       perceptualFingerprint: record.perceptualFingerprint ?? null,
       sharpnessScore: record.sharpnessScore ?? null,
@@ -695,6 +712,8 @@ export function useSlideshow() {
     rotateSlide,
     setSlideCropPosition,
     resetSlideCropPosition,
+    setSlideEffectOverrides,
+    clearSlideEffectOverrides,
     reorderSlides,
     sortSlides,
     clearAllSlides,

@@ -25,6 +25,17 @@ export interface SlideCropPosition {
   offsetY: number
 }
 
+/**
+ * Optional per-slide Smart Effects overrides.
+ * Omitted properties inherit the sequence-wide setting from `SmartEffectsConfig`.
+ */
+export interface SlideEffectOverrides {
+  fitMode?: FitMode
+  kenBurns?: boolean
+  colorLook?: ColorLook
+  vignette?: boolean
+}
+
 export type SlideSortMode = 'name' | 'date-asc' | 'date-desc' | 'reverse' | 'random'
 
 export interface LabeledOption<T extends string | number> {
@@ -126,6 +137,7 @@ export interface SlideImage {
   thumbnailUrl: string | null
   rotation: SlideRotationDegrees
   cropPosition: SlideCropPosition
+  effectOverrides: SlideEffectOverrides
   contentHash: string | null
   perceptualFingerprint: PerceptualFingerprint | null
   /** Normalized 0–100 sharpness metric computed during thumbnail decode; null if unmeasured or featureless. */

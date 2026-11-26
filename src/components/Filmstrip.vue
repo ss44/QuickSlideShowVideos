@@ -26,6 +26,10 @@ import {
   formatQualityIssueBadgeLabel,
 } from '../engine/imageQualityAnalyzer'
 import { computeSlideSeekTimeSeconds } from '../engine/timeline'
+import {
+  describeSlideEffectOverrides,
+  formatSlideOverrideBadgeLabel,
+} from '../engine/slideEffects'
 import { formatTime } from '../utils/formatters'
 
 const props = defineProps<{
@@ -146,6 +150,11 @@ function getSlideTooltip(slide: SlideImage, slideIndex: number): string {
   const details: string[] = []
   if (slide.width > 0 && slide.height > 0) {
     details.push(`${slide.width}×${slide.height}`)
+  }
+
+  const overrideDescription = describeSlideEffectOverrides(slide.effectOverrides)
+  if (overrideDescription) {
+    details.push(`Slide FX: ${overrideDescription}`)
   }
 
   const qualityAssessment = props.qualityAnalysis.assessmentBySlideId.get(slide.id)
@@ -384,11 +393,21 @@ function getSlideCardBorderClass(slide: SlideImage, slideIndex: number): string 
           {{ slideIndex + 1 }}
         </span>
 
-        <!-- Quality & Duplicate Indicator Badges -->
+        <!-- Per-slide Effect Override, Quality & Duplicate Indicator Badges -->
         <div
-          v-if="isQualityFlaggedSlide(slide.id) || isDuplicateSlide(slide.id)"
+          v-if="
+            formatSlideOverrideBadgeLabel(slide.effectOverrides) ||
+            isQualityFlaggedSlide(slide.id) ||
+            isDuplicateSlide(slide.id)
+          "
           class="pointer-events-none absolute right-1 bottom-1 flex items-center gap-0.5"
         >
+          <span
+            v-if="formatSlideOverrideBadgeLabel(slide.effectOverrides)"
+            class="rounded bg-indigo-500 px-1.5 py-0.5 text-[9px] font-semibold tracking-wide text-white uppercase shadow-xs"
+          >
+            {{ formatSlideOverrideBadgeLabel(slide.effectOverrides) }}
+          </span>
           <span
             v-if="getQualityBadgeLabel(slide.id)"
             class="rounded bg-yellow-400 px-1.5 py-0.5 text-[9px] font-semibold tracking-wide text-zinc-950 uppercase shadow-xs"
