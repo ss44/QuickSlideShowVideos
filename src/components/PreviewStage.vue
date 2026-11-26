@@ -26,12 +26,13 @@ import type { SavedProjectSummary } from '../types/project'
 import { BitmapCache } from '../engine/imageCache'
 import { SlideshowRenderer } from '../engine/renderer'
 import { PreviewAudioPlayer } from '../engine/audioEngine'
-import { findSlideIndexAtTime } from '../engine/timeline'
+import { computeSlideSeekTimeSeconds, findSlideIndexAtTime } from '../engine/timeline'
 import { formatRelativeTimestamp, formatTime } from '../utils/formatters'
 import { extractFilesFromDrop, SUPPORTED_IMAGE_INPUT_ACCEPT } from '../utils/fileDrop'
 
 const PREVIEW_MAX_RENDER_DIMENSION_PX = 960
 const PREVIEW_LOOKAHEAD_SLIDE_COUNT = 3
+const EXTERNAL_SEEK_EPSILON_SECONDS = 0.0005
 
 const props = defineProps<{
   slides: SlideImage[]
@@ -72,6 +73,7 @@ const audioPlayer = new PreviewAudioPlayer()
 let animationFrameId: number | null = null
 let previousFrameWallTimeMs = 0
 let playbackClockSeconds = 0
+let latestRenderRequestId = 0
 let viewportResizeObserver: ResizeObserver | null = null
 
 /**
@@ -150,6 +152,7 @@ const timelineProgressPercent = computed(() => {
 })
 
 async function renderFrameAtTime(timeSeconds: number) {
+  const renderRequestId = ++latestRenderRequestId
   const canvas = canvasRef.value
   if (!canvas) return
 
@@ -173,6 +176,9 @@ async function renderFrameAtTime(timeSeconds: number) {
     lookaheadCount: PREVIEW_LOOKAHEAD_SLIDE_COUNT,
     awaitActiveBitmaps: !props.isPlaying,
   })
+
+  // Discard stale async renders if a newer seek or animation frame occurred while decoding
+  if (renderRequestId !== latestRenderRequestId) return
 
   renderer.renderFrame(
     ctx,
@@ -238,25 +244,29 @@ function stepToAdjacentSlide(indexDelta: number) {
     0,
     Math.min(props.timeline.slides.length - 1, props.activeSlideIndex + indexDelta),
   )
-  const targetSlide = props.timeline.slides[targetIndex]
-  if (!targetSlide) return
+  const targetTimeSeconds = computeSlideSeekTimeSeconds(props.timeline, targetIndex)
+  if (targetTimeSeconds === null) return
 
-  const postTransitionOffset = Math.min(
-    targetSlide.transitionInDuration,
-    targetSlide.duration * 0.35,
-  )
-  seekToTime(targetSlide.startTime + postTransitionOffset)
+  seekToTime(targetTimeSeconds)
 }
 
-function seekToTime(targetTimeSeconds: number) {
+function syncPlaybackToTime(targetTimeSeconds: number, shouldEmitTimeUpdate: boolean) {
   const clampedTimeSeconds = Math.max(0, Math.min(props.timeline.totalDuration, targetTimeSeconds))
   playbackClockSeconds = clampedTimeSeconds
-  emit('update:currentTime', clampedTimeSeconds)
+  previousFrameWallTimeMs = performance.now()
+
+  if (shouldEmitTimeUpdate) {
+    emit('update:currentTime', clampedTimeSeconds)
+  }
 
   if (props.isPlaying) {
     audioPlayer.start(props.music, clampedTimeSeconds, props.timeline.totalDuration, props.isMuted)
   }
   void renderFrameAtTime(clampedTimeSeconds)
+}
+
+function seekToTime(targetTimeSeconds: number) {
+  syncPlaybackToTime(targetTimeSeconds, true)
 }
 
 function onScrubberInput(event: Event) {
@@ -267,8 +277,24 @@ function onScrubberInput(event: Event) {
 watch(
   () => props.isPlaying,
   (playing) => {
-    if (playing) startPlayback()
-    else stopPlayback()
+    if (playing) {
+      startPlayback()
+    } else {
+      stopPlayback()
+      void renderFrameAtTime(playbackClockSeconds)
+    }
+  },
+)
+
+watch(
+  () => props.currentTime,
+  (newTimeSeconds) => {
+    // Sync external seeks (e.g. clicking a filmstrip thumbnail or pressing arrow keys)
+    // whether playback is paused or actively running, while ignoring echoes from our own clock.
+    if (Math.abs(newTimeSeconds - playbackClockSeconds) <= EXTERNAL_SEEK_EPSILON_SECONDS) {
+      return
+    }
+    syncPlaybackToTime(newTimeSeconds, false)
   },
 )
 
@@ -300,14 +326,7 @@ watch(
 )
 
 watch(
-  () => [
-    props.currentTime,
-    props.slides,
-    props.timeline,
-    props.effects,
-    props.output.width,
-    props.output.height,
-  ],
+  () => [props.slides, props.timeline, props.effects, props.output.width, props.output.height],
   () => {
     if (!props.isPlaying) {
       playbackClockSeconds = props.currentTime
