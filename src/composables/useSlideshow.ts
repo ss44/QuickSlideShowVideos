@@ -28,6 +28,7 @@ import {
   contentHashQueue,
   findSlidesRequiringHash,
 } from '../engine/duplicateDetector'
+import { analyzeSlidesQuality } from '../engine/imageQualityAnalyzer'
 import {
   computeTimeline,
   estimateFileSizeMB,
@@ -68,6 +69,7 @@ function createSlideImageFromFile(file: File): SlideImage {
     rotation: 0,
     contentHash: null,
     perceptualFingerprint: null,
+    sharpnessScore: null,
   }
 }
 
@@ -161,6 +163,8 @@ export function useSlideshow() {
     analyzeSlideDuplicates(slides.value, duplicateDetection),
   )
 
+  const qualityAnalysis = computed(() => analyzeSlidesQuality(slides.value, output, effects))
+
   function clampPlaybackStateAfterRemoval() {
     if (currentTime.value > timeline.value.totalDuration) {
       currentTime.value = Math.max(0, timeline.value.totalDuration - 0.01)
@@ -197,7 +201,13 @@ export function useSlideshow() {
     for (const slide of targetSlides) {
       thumbnailQueue.enqueue(
         slide,
-        (thumbnailBlobUrl, naturalWidth, naturalHeight, perceptualFingerprint) => {
+        (
+          thumbnailBlobUrl,
+          naturalWidth,
+          naturalHeight,
+          perceptualFingerprint,
+          sharpnessScore,
+        ) => {
           const targetSlide = slides.value.find((item) => item.id === slide.id)
           if (targetSlide) {
             targetSlide.thumbnailUrl = thumbnailBlobUrl
@@ -206,6 +216,7 @@ export function useSlideshow() {
             if (perceptualFingerprint) {
               targetSlide.perceptualFingerprint = perceptualFingerprint
             }
+            targetSlide.sharpnessScore = sharpnessScore
           } else {
             // Slide was removed before its asynchronous thumbnail completed
             URL.revokeObjectURL(thumbnailBlobUrl)
@@ -542,6 +553,7 @@ export function useSlideshow() {
       rotation: record.rotation || 0,
       contentHash: record.contentHash ?? null,
       perceptualFingerprint: record.perceptualFingerprint ?? null,
+      sharpnessScore: record.sharpnessScore ?? null,
     }))
 
     slides.value = restoredSlides
@@ -624,6 +636,7 @@ export function useSlideshow() {
     estimatedSizeMB,
     activeSlideIndex,
     duplicateAnalysis,
+    qualityAnalysis,
     addFiles,
     removeSlide,
     removeDuplicateSlides,

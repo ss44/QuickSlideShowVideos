@@ -33,6 +33,7 @@ const {
   estimatedSizeMB,
   activeSlideIndex,
   duplicateAnalysis,
+  qualityAnalysis,
   addFiles,
   removeSlide,
   removeDuplicateSlides,
@@ -304,6 +305,7 @@ onBeforeUnmount(() => {
           :is-playing="isPlaying"
           :is-muted="isMuted"
           :active-slide-index="activeSlideIndex"
+          :quality-analysis="qualityAnalysis"
           :saved-projects="savedProjects"
           :opening-project-id="isOpeningProjectId"
           @update:current-time="currentTime = $event"
@@ -318,6 +320,8 @@ onBeforeUnmount(() => {
           :slides="slides"
           :active-slide-index="activeSlideIndex"
           :duplicate-analysis="duplicateAnalysis"
+          :quality-analysis="qualityAnalysis"
+          :output="output"
           @add-more="previewStageRef?.openFilePicker()"
           @remove-duplicates="removeDuplicateSlides"
           @jump-to="jumpToSlide"
