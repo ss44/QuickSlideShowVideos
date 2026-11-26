@@ -62,7 +62,7 @@ const emit = defineEmits<{
             title="Unsaved changes"
           />
         </p>
-        <p v-else class="text-[11px] text-zinc-500">100% In-Browser Video Studio</p>
+        <p v-else class="text-[11px] text-zinc-500">100% In Browser Slide Show Maker</p>
       </div>
     </div>
 

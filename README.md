@@ -1,6 +1,6 @@
 # QuickSlideShowVideos
 
-A fast, **100% browser-based slideshow video editor** built with Vue 3, TypeScript, Canvas 2D, and WebCodecs. Drop in hundreds of photos, pick transitions and smart effects, add music, preview live, and export an **MP4** or **WebM** locally—no server or uploads required.
+A fast, **100% In Browser Slide Show Maker** built with Vue 3, TypeScript, Canvas 2D, and WebCodecs. Drop in hundreds of photos, pick transitions and smart effects, add music, preview live, and export an **MP4** or **WebM** locally—no server or uploads required.
 
 ![QuickSlideShow Editor](docs/screenshots/editor-studio.png)
 

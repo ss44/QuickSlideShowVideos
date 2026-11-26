@@ -20,7 +20,7 @@ export default defineConfig({
         name: 'Quick Slide Show',
         short_name: 'Quick Slide Show',
         description:
-          '100% browser-based slideshow video editor. Drop in photos, pick transitions and music, and export MP4 or WebM locally.',
+          '100% In Browser Slide Show Maker. Drop in photos, pick transitions and music, and export MP4 or WebM locally.',
         theme_color: '#09090b',
         background_color: '#09090b',
         display: 'standalone',

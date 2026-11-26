@@ -37,7 +37,7 @@ const emit = defineEmits<{
       :class="props.hideHeader ? '' : 'px-4 pb-5'"
     >
       <p class="text-[11px] leading-relaxed text-zinc-400">
-        100% browser-based slideshow studio. Photos and audio are processed locally on your device.
+        100% In Browser Slide Show Maker. Photos and audio are processed locally on your device.
       </p>
 
       <div class="space-y-1.5">
