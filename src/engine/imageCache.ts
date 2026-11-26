@@ -18,9 +18,28 @@ type ThumbnailCompletionCallback = (
   perceptualFingerprint: PerceptualFingerprint | null,
 ) => void
 
+type ThumbnailErrorCallback = () => void
+
 interface ThumbnailGenerationJob {
   slide: SlideImage
   onComplete: ThumbnailCompletionCallback
+  onError?: ThumbnailErrorCallback
+}
+
+/**
+ * Decodes an image file into an `ImageBitmap` while honoring EXIF orientation.
+ * Retries once without options only if the browser rejects the `imageOrientation` option itself;
+ * throws for undecodable or corrupted files so callers can reject them cleanly.
+ */
+async function decodeOrientedImageBitmap(file: Blob): Promise<ImageBitmap> {
+  try {
+    return await createImageBitmap(file, { imageOrientation: 'from-image' })
+  } catch (err) {
+    if (err instanceof TypeError) {
+      return await createImageBitmap(file)
+    }
+    throw err
+  }
 }
 
 /**
@@ -31,8 +50,12 @@ class ThumbnailQueue {
   private pendingJobs: ThumbnailGenerationJob[] = []
   private activeWorkerCount = 0
 
-  enqueue(slide: SlideImage, onComplete: ThumbnailCompletionCallback) {
-    this.pendingJobs.push({ slide, onComplete })
+  enqueue(
+    slide: SlideImage,
+    onComplete: ThumbnailCompletionCallback,
+    onError?: ThumbnailErrorCallback,
+  ) {
+    this.pendingJobs.push({ slide, onComplete, onError })
     this.processNextJobs()
   }
 
@@ -54,12 +77,14 @@ class ThumbnailQueue {
               result.naturalHeight,
               result.perceptualFingerprint,
             )
+          } else {
+            nextJob.onError?.()
           }
         })
         .catch(() => {
-          // Fallback to direct object URL if createImageBitmap is unsupported for an exotic image subtype
-          const fallbackObjectUrl = URL.createObjectURL(nextJob.slide.file)
-          nextJob.onComplete(fallbackObjectUrl, 1920, 1080, null)
+          // Do not fall back to raw object URLs: undecodable files (e.g. RAW/corrupt files)
+          // would render as broken thumbnails and blank frames during preview/export.
+          nextJob.onError?.()
         })
         .finally(() => {
           this.activeWorkerCount--
@@ -74,9 +99,14 @@ class ThumbnailQueue {
     naturalHeight: number
     perceptualFingerprint: PerceptualFingerprint | null
   } | null> {
-    const decodedBitmap = await createImageBitmap(slide.file, { imageOrientation: 'from-image' })
+    const decodedBitmap = await decodeOrientedImageBitmap(slide.file)
     const naturalWidth = decodedBitmap.width
     const naturalHeight = decodedBitmap.height
+
+    if (naturalWidth <= 0 || naturalHeight <= 0) {
+      decodedBitmap.close()
+      return null
+    }
 
     const downscaleFactor = Math.min(
       1,
@@ -273,7 +303,7 @@ export class BitmapCache {
   }
 
   private async decodeScaledBitmap(slide: SlideImage): Promise<ImageBitmap | null> {
-    const fullBitmap = await createImageBitmap(slide.file, { imageOrientation: 'from-image' })
+    const fullBitmap = await decodeOrientedImageBitmap(slide.file)
     const maxAllowedDimensionPx = Math.round(this.targetMaxDimensionPx * BITMAP_OVERSCAN_SCALE)
 
     if (
