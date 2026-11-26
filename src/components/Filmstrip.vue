@@ -13,6 +13,7 @@ import {
   AlertTriangle,
 } from 'lucide-vue-next'
 import type {
+  ComputedTimeline,
   DuplicateAnalysis,
   ImageQualityAnalysis,
   OutputConfig,
@@ -24,9 +25,12 @@ import {
   describeSlideQualityIssues,
   formatQualityIssueBadgeLabel,
 } from '../engine/imageQualityAnalyzer'
+import { computeSlideSeekTimeSeconds } from '../engine/timeline'
+import { formatTime } from '../utils/formatters'
 
 const props = defineProps<{
   slides: SlideImage[]
+  timeline: ComputedTimeline
   activeSlideIndex: number
   duplicateAnalysis: DuplicateAnalysis
   qualityAnalysis: ImageQualityAnalysis
@@ -131,7 +135,14 @@ function jumpToNextFlaggedSlide() {
   }
 }
 
-function getSlideTooltip(slide: SlideImage): string {
+function getSlideSeekTimestampLabel(slideIndex: number): string | null {
+  const seekTimeSeconds = computeSlideSeekTimeSeconds(props.timeline, slideIndex)
+  return seekTimeSeconds === null ? null : formatTime(seekTimeSeconds)
+}
+
+function getSlideTooltip(slide: SlideImage, slideIndex: number): string {
+  const timestampLabel = getSlideSeekTimestampLabel(slideIndex)
+  const timestampSuffix = timestampLabel ? ` (${timestampLabel})` : ''
   const details: string[] = []
   if (slide.width > 0 && slide.height > 0) {
     details.push(`${slide.width}×${slide.height}`)
@@ -154,7 +165,16 @@ function getSlideTooltip(slide: SlideImage): string {
     }
   }
 
-  return details.length > 0 ? `${slide.name} — ${details.join(' | ')}` : slide.name
+  return details.length > 0
+    ? `${slide.name}${timestampSuffix} — ${details.join(' | ')}`
+    : `${slide.name}${timestampSuffix}`
+}
+
+function getSlideAriaLabel(slide: SlideImage, slideIndex: number): string {
+  const timestampLabel = getSlideSeekTimestampLabel(slideIndex)
+  return timestampLabel
+    ? `Jump to slide ${slideIndex + 1} (${slide.name}) at ${timestampLabel}`
+    : `Jump to slide ${slideIndex + 1} (${slide.name})`
 }
 
 function getDuplicateBadgeLabel(slideId: string): string {
@@ -211,7 +231,7 @@ function getSlideCardBorderClass(slide: SlideImage, slideIndex: number): string 
           <span class="hidden sm:inline">low quality</span>
         </button>
         <span v-if="props.slides.length > 1" class="hidden text-[11px] text-zinc-500 md:inline">
-          Drag thumbnails to reorder
+          Click to jump · Drag to reorder
         </span>
       </div>
 
@@ -264,18 +284,11 @@ function getSlideCardBorderClass(slide: SlideImage, slideIndex: number): string 
               v-for="sortOption in SLIDE_SORT_OPTIONS"
               :key="sortOption.id"
               type="button"
-              class="block w-full px-3 py-2 text-left text-xs text-zinc-200 hover:bg-zinc-800 sm:py-1.5"
+              class="flex w-full items-center gap-1.5 px-3 py-2 text-left text-xs text-zinc-200 hover:bg-zinc-800 sm:py-1.5"
               @click="applySortMode(sortOption.id)"
             >
+              <Shuffle v-if="sortOption.id === 'random'" class="h-3 w-3 shrink-0 text-indigo-400" />
               {{ sortOption.label }}
-            </button>
-            <button
-              type="button"
-              class="flex w-full items-center gap-1.5 px-3 py-2 text-left text-xs text-zinc-200 hover:bg-zinc-800 sm:py-1.5"
-              @click="applySortMode('shuffle')"
-            >
-              <Shuffle class="h-3 w-3 text-indigo-400" />
-              Shuffle
             </button>
           </div>
         </div>
@@ -325,9 +338,13 @@ function getSlideCardBorderClass(slide: SlideImage, slideIndex: number): string 
       <div
         v-for="(slide, slideIndex) in props.slides"
         :key="slide.id"
+        role="button"
+        tabindex="0"
         draggable="true"
-        :title="getSlideTooltip(slide)"
-        class="group relative shrink-0 cursor-pointer overflow-hidden rounded-lg bg-zinc-900 transition"
+        :title="getSlideTooltip(slide, slideIndex)"
+        :aria-label="getSlideAriaLabel(slide, slideIndex)"
+        :aria-current="slideIndex === props.activeSlideIndex ? 'true' : undefined"
+        class="group relative shrink-0 cursor-pointer overflow-hidden rounded-lg bg-zinc-900 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
         :class="[
           isGridExpanded ? 'aspect-[4/3] w-full' : 'h-18 w-24 md:h-24 md:w-32',
           getSlideCardBorderClass(slide, slideIndex),
@@ -337,6 +354,7 @@ function getSlideCardBorderClass(slide: SlideImage, slideIndex: number): string 
           draggedSlideIndex === slideIndex ? 'opacity-40' : '',
         ]"
         @click="emit('jumpTo', slideIndex)"
+        @keydown.enter.self.prevent="emit('jumpTo', slideIndex)"
         @dragstart="onDragStart($event, slideIndex)"
         @dragover="onDragOver($event, slideIndex)"
         @drop="onDrop($event, slideIndex)"

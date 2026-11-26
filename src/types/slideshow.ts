@@ -15,7 +15,7 @@ export type TransitionOrderMode = 'cycle' | 'random'
 
 export type SlideRotationDegrees = 0 | 90 | 180 | 270
 
-export type SlideSortMode = 'name' | 'date-asc' | 'date-desc' | 'reverse' | 'shuffle'
+export type SlideSortMode = 'name' | 'date-asc' | 'date-desc' | 'reverse' | 'random'
 
 export interface LabeledOption<T extends string | number> {
   id: T
@@ -64,6 +64,7 @@ export const SLIDE_SORT_OPTIONS: LabeledOption<SlideSortMode>[] = [
   { id: 'date-asc', label: 'Date (Oldest first)' },
   { id: 'date-desc', label: 'Date (Newest first)' },
   { id: 'reverse', label: 'Reverse Order' },
+  { id: 'random', label: 'Random' },
 ]
 
 export interface PerceptualFingerprint {

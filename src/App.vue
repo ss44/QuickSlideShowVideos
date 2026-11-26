@@ -22,6 +22,7 @@ const {
   currentTime,
   isPlaying,
   isMuted,
+  rejectedFilesNotice,
   timing,
   selectedTransitions,
   transitionOrder,
@@ -35,6 +36,7 @@ const {
   duplicateAnalysis,
   qualityAnalysis,
   addFiles,
+  dismissRejectedFilesNotice,
   removeSlide,
   removeDuplicateSlides,
   rotateSlide,
@@ -308,16 +310,19 @@ onBeforeUnmount(() => {
           :quality-analysis="qualityAnalysis"
           :saved-projects="savedProjects"
           :opening-project-id="isOpeningProjectId"
+          :rejected-files-notice="rejectedFilesNotice"
           @update:current-time="currentTime = $event"
           @update:is-playing="isPlaying = $event"
           @update:is-muted="isMuted = $event"
           @add-files="addFiles"
+          @dismiss-rejected-files-notice="dismissRejectedFilesNotice"
           @open-saved-project="openSavedProject"
           @open-projects-modal="openProjectsModal"
         />
 
         <Filmstrip
           :slides="slides"
+          :timeline="timeline"
           :active-slide-index="activeSlideIndex"
           :duplicate-analysis="duplicateAnalysis"
           :quality-analysis="qualityAnalysis"

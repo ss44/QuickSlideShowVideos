@@ -18,6 +18,12 @@ export {
 const MIN_SLIDE_DURATION_SECONDS = 0.4
 const MIN_TIMELINE_SEGMENT_SECONDS = 0.3
 /**
+ * Small epsilon added past `transitionInDuration` when jumping directly to a slide
+ * so floating-point subtraction (`timeSeconds - startTime`) reliably exits the incoming
+ * transition window and renders the selected slide cleanly in full.
+ */
+const TRANSITION_SETTLE_EPSILON_SECONDS = 0.001
+/**
  * Maximum fraction of a slide's duration that a single incoming transition may occupy.
  * Capping at 45% ensures the incoming and outgoing transitions of a slide never overlap.
  */
@@ -275,6 +281,33 @@ export function findSlideIndexAtTime(timeline: ComputedTimeline, timeSeconds: nu
     }
   }
   return Math.min(timelineSlides.length - 1, Math.max(0, lowIndex))
+}
+
+/**
+ * Computes the video timestamp (in seconds) for navigating directly to the slide at `slideIndex`.
+ * Lands just past any incoming transition so the clicked slide is immediately shown in full
+ * rather than still obscured by the previous slide, while staying strictly inside its segment.
+ */
+export function computeSlideSeekTimeSeconds(
+  timeline: ComputedTimeline,
+  slideIndex: number,
+): number | null {
+  const timelineSlide = timeline.slides[slideIndex]
+  if (!timelineSlide) return null
+
+  if (timelineSlide.transitionIn === 'cut' || timelineSlide.transitionInDuration <= 0) {
+    return timelineSlide.startTime
+  }
+
+  const settledTimeSeconds =
+    timelineSlide.startTime +
+    timelineSlide.transitionInDuration +
+    TRANSITION_SETTLE_EPSILON_SECONDS
+  const maxSafeSlideTimeSeconds = Math.max(
+    timelineSlide.startTime,
+    timelineSlide.endTime - TRANSITION_SETTLE_EPSILON_SECONDS,
+  )
+  return Math.min(settledTimeSeconds, maxSafeSlideTimeSeconds)
 }
 
 /**
