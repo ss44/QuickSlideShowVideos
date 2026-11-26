@@ -139,6 +139,10 @@ function toPlainSavedSlideRecord(slide: SlideImage): SavedSlideRecord {
     width: slide.width,
     height: slide.height,
     rotation: slide.rotation,
+    cropPosition: {
+      offsetX: slide.cropPosition.offsetX,
+      offsetY: slide.cropPosition.offsetY,
+    },
     contentHash: slide.contentHash,
     perceptualFingerprint: slide.perceptualFingerprint
       ? {

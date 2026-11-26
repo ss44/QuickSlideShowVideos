@@ -14,12 +14,15 @@ import {
   Loader2,
   AlertTriangle,
   X,
+  Move,
+  RotateCcw,
 } from 'lucide-vue-next'
 import type {
   ComputedTimeline,
   ImageQualityAnalysis,
   MusicConfig,
   OutputConfig,
+  SlideCropPosition,
   SlideImage,
   SmartEffectsConfig,
 } from '../types/slideshow'
@@ -29,7 +32,14 @@ import {
   describeSlideQualityIssues,
   formatQualityIssueBadgeLabel,
 } from '../engine/imageQualityAnalyzer'
-import { SlideshowRenderer } from '../engine/renderer'
+import {
+  SlideshowRenderer,
+  applyDragDeltaToCropPosition,
+  computeCoverCropGeometry,
+  computeEffectiveKenBurnsScale,
+  computeOrientedImageDimensions,
+  hasCustomCropPosition,
+} from '../engine/renderer'
 import { PreviewAudioPlayer } from '../engine/audioEngine'
 import { computeSlideSeekTimeSeconds, findSlideIndexAtTime } from '../engine/timeline'
 import { formatRelativeTimestamp, formatTime } from '../utils/formatters'
@@ -38,6 +48,7 @@ import { extractFilesFromDrop, SUPPORTED_IMAGE_INPUT_ACCEPT } from '../utils/fil
 const PREVIEW_MAX_RENDER_DIMENSION_PX = 960
 const PREVIEW_LOOKAHEAD_SLIDE_COUNT = 3
 const EXTERNAL_SEEK_EPSILON_SECONDS = 0.0005
+const CROP_DRAG_THRESHOLD_PX = 4
 
 const props = defineProps<{
   slides: SlideImage[]
@@ -59,6 +70,8 @@ const emit = defineEmits<{
   (e: 'update:currentTime', timeSeconds: number): void
   (e: 'update:isPlaying', playing: boolean): void
   (e: 'update:isMuted', muted: boolean): void
+  (e: 'updateSlideCrop', slideId: string, cropPosition: SlideCropPosition): void
+  (e: 'resetSlideCrop', slideId: string): void
   (e: 'addFiles', files: File[]): void
   (e: 'dismissRejectedFilesNotice'): void
   (e: 'openSavedProject', projectId: string): void
@@ -71,16 +84,35 @@ const fileInputRef = ref<HTMLInputElement | null>(null)
 const folderInputRef = ref<HTMLInputElement | null>(null)
 const isDraggingOver = ref(false)
 const canvasViewportSize = ref({ width: 0, height: 0 })
+const isRepositioningCrop = ref(false)
+const activeBitmapDimensions = ref<{ slideId: string | null; width: number; height: number }>({
+  slideId: null,
+  width: 0,
+  height: 0,
+})
 
 const renderer = new SlideshowRenderer()
 const bitmapCache = new BitmapCache(12, 1280)
 const audioPlayer = new PreviewAudioPlayer()
+
+interface CropDragSession {
+  pointerId: number
+  slideId: string
+  startClientX: number
+  startClientY: number
+  lastClientX: number
+  lastClientY: number
+  hasMovedPastThreshold: boolean
+}
 
 let animationFrameId: number | null = null
 let previousFrameWallTimeMs = 0
 let playbackClockSeconds = 0
 let latestRenderRequestId = 0
 let viewportResizeObserver: ResizeObserver | null = null
+let activeCropDragSession: CropDragSession | null = null
+let suppressNextCanvasClick = false
+let clearSuppressedClickTimeoutId: ReturnType<typeof setTimeout> | null = null
 
 /**
  * Scales the preview canvas internal resolution to at most 960px on its longest side
@@ -157,14 +189,68 @@ const timelineProgressPercent = computed(() => {
   return Math.min(100, Math.max(0, (props.currentTime / props.timeline.totalDuration) * 100))
 })
 
+const activeSlide = computed<SlideImage | null>(() => {
+  if (props.activeSlideIndex < 0 || props.activeSlideIndex >= props.slides.length) {
+    return null
+  }
+  return props.slides[props.activeSlideIndex] ?? null
+})
+
+const activeSlideCoverGeometry = computed(() => {
+  if (props.effects.fitMode !== 'cover' || !activeSlide.value) return null
+
+  const slide = activeSlide.value
+  const hasMatchingBitmapSize =
+    activeBitmapDimensions.value.slideId === slide.id &&
+    activeBitmapDimensions.value.width > 0 &&
+    activeBitmapDimensions.value.height > 0
+
+  const sourceWidth = hasMatchingBitmapSize ? activeBitmapDimensions.value.width : slide.width
+  const sourceHeight = hasMatchingBitmapSize ? activeBitmapDimensions.value.height : slide.height
+  if (sourceWidth <= 0 || sourceHeight <= 0) return null
+
+  const { orientedWidth, orientedHeight } = computeOrientedImageDimensions(
+    sourceWidth,
+    sourceHeight,
+    slide.rotation || 0,
+  )
+
+  return computeCoverCropGeometry(
+    previewCanvasDimensions.value.width,
+    previewCanvasDimensions.value.height,
+    orientedWidth,
+    orientedHeight,
+  )
+})
+
+const canRepositionActiveSlide = computed(() => Boolean(activeSlideCoverGeometry.value?.canPan))
+
+const isActiveSlideCropCustomized = computed(() => {
+  const slide = activeSlide.value
+  const geometry = activeSlideCoverGeometry.value
+  if (!slide || !geometry || !geometry.canPan) return false
+  if (!hasCustomCropPosition(slide.cropPosition)) return false
+
+  return (
+    (geometry.canPanX && Math.abs(slide.cropPosition.offsetX) > 0.001) ||
+    (geometry.canPanY && Math.abs(slide.cropPosition.offsetY) > 0.001)
+  )
+})
+
+const canvasCursorClass = computed(() => {
+  if (isRepositioningCrop.value) return 'cursor-grabbing touch-none'
+  if (canRepositionActiveSlide.value) return 'cursor-grab touch-none'
+  return 'cursor-pointer'
+})
+
 const activeSlideQualityWarning = computed(() => {
-  const activeSlide = props.slides[props.activeSlideIndex]
-  if (!activeSlide) return null
-  const assessment = props.qualityAnalysis.assessmentBySlideId.get(activeSlide.id)
+  const slide = activeSlide.value
+  if (!slide) return null
+  const assessment = props.qualityAnalysis.assessmentBySlideId.get(slide.id)
   if (!assessment || assessment.issues.length === 0) return null
   return {
     label: formatQualityIssueBadgeLabel(assessment),
-    details: describeSlideQualityIssues(activeSlide, assessment, props.output),
+    details: describeSlideQualityIssues(slide, assessment, props.output),
   }
 })
 
@@ -196,6 +282,24 @@ async function renderFrameAtTime(timeSeconds: number) {
 
   // Discard stale async renders if a newer seek or animation frame occurred while decoding
   if (renderRequestId !== latestRenderRequestId) return
+
+  const activeTimelineSlide = props.timeline.slides[activeTimelineIndex]
+  const currentSlide = activeTimelineSlide ? props.slides[activeTimelineSlide.slideIndex] : null
+  if (currentSlide) {
+    const activeBitmap = bitmapCache.getSync(currentSlide.id)
+    if (
+      activeBitmap &&
+      (activeBitmapDimensions.value.slideId !== currentSlide.id ||
+        activeBitmapDimensions.value.width !== activeBitmap.width ||
+        activeBitmapDimensions.value.height !== activeBitmap.height)
+    ) {
+      activeBitmapDimensions.value = {
+        slideId: currentSlide.id,
+        width: activeBitmap.width,
+        height: activeBitmap.height,
+      }
+    }
+  }
 
   renderer.renderFrame(
     ctx,
@@ -253,6 +357,161 @@ function stopPlayback() {
 function togglePlay() {
   if (props.slides.length === 0) return
   emit('update:isPlaying', !props.isPlaying)
+}
+
+function clearCropDragSession(pointerId?: number) {
+  const canvas = canvasRef.value
+  if (canvas && pointerId !== undefined) {
+    try {
+      if (canvas.hasPointerCapture(pointerId)) {
+        canvas.releasePointerCapture(pointerId)
+      }
+    } catch {
+      // Ignore pointer capture release errors if pointer was already released
+    }
+  }
+  activeCropDragSession = null
+  isRepositioningCrop.value = false
+}
+
+function scheduleSuppressedClickReset() {
+  if (clearSuppressedClickTimeoutId !== null) {
+    clearTimeout(clearSuppressedClickTimeoutId)
+  }
+  clearSuppressedClickTimeoutId = setTimeout(() => {
+    suppressNextCanvasClick = false
+    clearSuppressedClickTimeoutId = null
+  }, 0)
+}
+
+function settlePlayheadPastIncomingTransitionIfNeeded(slideIndex: number) {
+  const timelineSlide = props.timeline.slides[slideIndex]
+  if (!timelineSlide || slideIndex <= 0) return
+  if (timelineSlide.transitionIn === 'cut' || timelineSlide.transitionInDuration <= 0) return
+
+  const elapsedInSlide = Math.max(0, playbackClockSeconds - timelineSlide.startTime)
+  if (elapsedInSlide >= timelineSlide.transitionInDuration) return
+
+  const settledTimeSeconds = computeSlideSeekTimeSeconds(props.timeline, slideIndex)
+  if (settledTimeSeconds !== null) {
+    seekToTime(settledTimeSeconds)
+  }
+}
+
+function onCanvasPointerDown(event: PointerEvent) {
+  if (!event.isPrimary || event.button !== 0 || !canRepositionActiveSlide.value || !activeSlide.value) {
+    return
+  }
+  if (activeCropDragSession) return
+
+  activeCropDragSession = {
+    pointerId: event.pointerId,
+    slideId: activeSlide.value.id,
+    startClientX: event.clientX,
+    startClientY: event.clientY,
+    lastClientX: event.clientX,
+    lastClientY: event.clientY,
+    hasMovedPastThreshold: false,
+  }
+}
+
+function onCanvasPointerMove(event: PointerEvent) {
+  const session = activeCropDragSession
+  if (!session || event.pointerId !== session.pointerId) return
+
+  const canvas = canvasRef.value
+  const geometry = activeSlideCoverGeometry.value
+  const slide = activeSlide.value
+  if (!canvas || !geometry || !geometry.canPan || !slide || slide.id !== session.slideId) {
+    clearCropDragSession(session.pointerId)
+    return
+  }
+
+  let deltaClientX = event.clientX - session.lastClientX
+  let deltaClientY = event.clientY - session.lastClientY
+
+  if (!session.hasMovedPastThreshold) {
+    const totalDragDistancePx = Math.hypot(
+      event.clientX - session.startClientX,
+      event.clientY - session.startClientY,
+    )
+    if (totalDragDistancePx < CROP_DRAG_THRESHOLD_PX) return
+
+    session.hasMovedPastThreshold = true
+    isRepositioningCrop.value = true
+    deltaClientX = event.clientX - session.startClientX
+    deltaClientY = event.clientY - session.startClientY
+
+    try {
+      canvas.setPointerCapture(session.pointerId)
+    } catch {
+      // Non-fatal if pointer capture is unsupported or unavailable
+    }
+
+    if (props.isPlaying) {
+      emit('update:isPlaying', false)
+    }
+    settlePlayheadPastIncomingTransitionIfNeeded(props.activeSlideIndex)
+  }
+
+  session.lastClientX = event.clientX
+  session.lastClientY = event.clientY
+
+  const canvasRect = canvas.getBoundingClientRect()
+  if (canvasRect.width <= 0 || canvasRect.height <= 0) return
+
+  const deltaCanvasX = (deltaClientX / canvasRect.width) * canvas.width
+  const deltaCanvasY = (deltaClientY / canvasRect.height) * canvas.height
+  const scaleMultiplier = computeEffectiveKenBurnsScale(
+    props.timeline,
+    props.activeSlideIndex,
+    playbackClockSeconds,
+    props.effects,
+  )
+
+  const updatedCropPosition = applyDragDeltaToCropPosition({
+    currentCropPosition: slide.cropPosition,
+    deltaCanvasX,
+    deltaCanvasY,
+    coverGeometry: geometry,
+    scaleMultiplier,
+  })
+
+  emit('updateSlideCrop', slide.id, updatedCropPosition)
+}
+
+function onCanvasPointerUp(event: PointerEvent) {
+  const session = activeCropDragSession
+  if (!session || event.pointerId !== session.pointerId) return
+
+  if (session.hasMovedPastThreshold) {
+    suppressNextCanvasClick = true
+    scheduleSuppressedClickReset()
+  }
+  clearCropDragSession(session.pointerId)
+}
+
+function onCanvasPointerCancel(event: PointerEvent) {
+  const session = activeCropDragSession
+  if (!session || event.pointerId !== session.pointerId) return
+  clearCropDragSession(session.pointerId)
+}
+
+function onCanvasClick() {
+  if (suppressNextCanvasClick) {
+    suppressNextCanvasClick = false
+    if (clearSuppressedClickTimeoutId !== null) {
+      clearTimeout(clearSuppressedClickTimeoutId)
+      clearSuppressedClickTimeoutId = null
+    }
+    return
+  }
+  togglePlay()
+}
+
+function resetActiveSlideCrop() {
+  if (!activeSlide.value) return
+  emit('resetSlideCrop', activeSlide.value.id)
 }
 
 function stepToAdjacentSlide(indexDelta: number) {
@@ -390,13 +649,27 @@ function openFolderPicker() {
 
 function clearBitmapCache() {
   bitmapCache.clear()
+  activeBitmapDimensions.value = { slideId: null, width: 0, height: 0 }
 }
+
+watch(canRepositionActiveSlide, (canReposition) => {
+  if (!canReposition && activeCropDragSession) {
+    clearCropDragSession(activeCropDragSession.pointerId)
+  }
+})
 
 onMounted(() => {
   void renderFrameAtTime(props.currentTime)
 })
 
 onBeforeUnmount(() => {
+  if (clearSuppressedClickTimeoutId !== null) {
+    clearTimeout(clearSuppressedClickTimeoutId)
+    clearSuppressedClickTimeoutId = null
+  }
+  if (activeCropDragSession) {
+    clearCropDragSession(activeCropDragSession.pointerId)
+  }
   viewportResizeObserver?.disconnect()
   viewportResizeObserver = null
   stopPlayback()
@@ -569,9 +842,27 @@ defineExpose({ openFilePicker, clearBitmapCache })
         >
           <canvas
             ref="canvasRef"
-            class="block h-full w-full cursor-pointer object-contain"
-            @click="togglePlay"
+            class="block h-full w-full object-contain"
+            :class="canvasCursorClass"
+            @pointerdown="onCanvasPointerDown"
+            @pointermove="onCanvasPointerMove"
+            @pointerup="onCanvasPointerUp"
+            @pointercancel="onCanvasPointerCancel"
+            @lostpointercapture="onCanvasPointerCancel"
+            @click="onCanvasClick"
           />
+
+          <!-- Rule-of-thirds framing guide while dragging crop position -->
+          <div
+            v-if="isRepositioningCrop"
+            class="pointer-events-none absolute inset-0"
+            aria-hidden="true"
+          >
+            <div class="absolute inset-y-0 left-1/3 w-px bg-white/30 shadow-[0_0_2px_rgba(0,0,0,0.8)]" />
+            <div class="absolute inset-y-0 left-2/3 w-px bg-white/30 shadow-[0_0_2px_rgba(0,0,0,0.8)]" />
+            <div class="absolute inset-x-0 top-1/3 h-px bg-white/30 shadow-[0_0_2px_rgba(0,0,0,0.8)]" />
+            <div class="absolute inset-x-0 top-2/3 h-px bg-white/30 shadow-[0_0_2px_rgba(0,0,0,0.8)]" />
+          </div>
 
           <!-- Top-left status pill -->
           <div
@@ -582,14 +873,50 @@ defineExpose({ openFilePicker, clearBitmapCache })
             <span class="text-zinc-400">{{ props.output.width }}×{{ props.output.height }}</span>
           </div>
 
-          <!-- Top-right quality warning pill (editor overlay only; never rendered onto exported video) -->
+          <!-- Top-right editor overlays (never rendered onto exported video) -->
           <div
-            v-if="activeSlideQualityWarning"
-            :title="activeSlideQualityWarning.details"
-            class="absolute top-2 right-2 flex items-center gap-1 rounded-md border border-yellow-400/50 bg-black/75 px-2 py-0.5 text-[10px] font-semibold text-yellow-300 backdrop-blur-sm sm:top-3 sm:right-3 sm:gap-1.5 sm:px-2.5 sm:py-1 sm:text-[11px]"
+            v-if="canRepositionActiveSlide || activeSlideQualityWarning"
+            class="pointer-events-none absolute top-2 right-2 flex flex-col items-end gap-1.5 sm:top-3 sm:right-3"
           >
-            <AlertTriangle class="h-3 w-3 shrink-0 text-yellow-400" />
-            <span>{{ activeSlideQualityWarning.label }}</span>
+            <!-- Crop framing hint & reset control (Crop Fill mode only) -->
+            <div
+              v-if="canRepositionActiveSlide"
+              class="flex items-center gap-1.5 rounded-md bg-black/65 px-2 py-0.5 text-[10px] font-medium text-zinc-200 backdrop-blur-sm transition sm:gap-2 sm:px-2.5 sm:py-1 sm:text-[11px]"
+              :class="isRepositioningCrop ? 'ring-1 ring-indigo-400/70' : ''"
+            >
+              <span class="inline-flex items-center gap-1 text-zinc-300">
+                <Move class="h-3 w-3 shrink-0 text-indigo-300" />
+                <span v-if="isRepositioningCrop">Reframing…</span>
+                <span v-else>
+                  <span class="hidden sm:inline">Drag to reframe</span>
+                  <span class="sm:hidden">Drag</span>
+                </span>
+              </span>
+              <template v-if="isActiveSlideCropCustomized">
+                <span class="text-zinc-600">·</span>
+                <button
+                  type="button"
+                  class="pointer-events-auto inline-flex items-center gap-1 rounded px-1 py-0.5 text-indigo-300 transition hover:bg-indigo-500/20 hover:text-indigo-100"
+                  title="Reset crop position to center"
+                  aria-label="Reset crop position to center"
+                  @pointerdown.stop
+                  @click.stop="resetActiveSlideCrop"
+                >
+                  <RotateCcw class="h-3 w-3" />
+                  <span>Reset</span>
+                </button>
+              </template>
+            </div>
+
+            <!-- Quality warning pill -->
+            <div
+              v-if="activeSlideQualityWarning"
+              :title="activeSlideQualityWarning.details"
+              class="pointer-events-auto flex items-center gap-1 rounded-md border border-yellow-400/50 bg-black/75 px-2 py-0.5 text-[10px] font-semibold text-yellow-300 backdrop-blur-sm sm:gap-1.5 sm:px-2.5 sm:py-1 sm:text-[11px]"
+            >
+              <AlertTriangle class="h-3 w-3 shrink-0 text-yellow-400" />
+              <span>{{ activeSlideQualityWarning.label }}</span>
+            </div>
           </div>
         </div>
       </div>

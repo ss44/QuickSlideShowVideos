@@ -15,6 +15,16 @@ export type TransitionOrderMode = 'cycle' | 'random'
 
 export type SlideRotationDegrees = 0 | 90 | 180 | 270
 
+/**
+ * Normalized per-slide crop framing offset for `cover` (Crop Fill) mode in `[-1, 1]` per axis.
+ * `(0, 0)` centers the photo; `+1` shifts the image fully right/down (showing its left/top edge)
+ * and `-1` shifts it fully left/up (showing its right/bottom edge).
+ */
+export interface SlideCropPosition {
+  offsetX: number
+  offsetY: number
+}
+
 export type SlideSortMode = 'name' | 'date-asc' | 'date-desc' | 'reverse' | 'random'
 
 export interface LabeledOption<T extends string | number> {
@@ -115,6 +125,7 @@ export interface SlideImage {
   height: number
   thumbnailUrl: string | null
   rotation: SlideRotationDegrees
+  cropPosition: SlideCropPosition
   contentHash: string | null
   perceptualFingerprint: PerceptualFingerprint | null
   /** Normalized 0–100 sharpness metric computed during thumbnail decode; null if unmeasured or featureless. */

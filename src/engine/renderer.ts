@@ -2,7 +2,9 @@ import type {
   ColorLook,
   ComputedTimeline,
   FitMode,
+  SlideCropPosition,
   SlideImage,
+  SlideRotationDegrees,
   SmartEffectsConfig,
   TimelineSlide,
   TransitionType,
@@ -12,6 +14,150 @@ import { findSlideIndexAtTime } from './timeline'
 const CANVAS_BACKGROUND_COLOR = '#09090b'
 const BLUR_SCRATCH_DIMENSION_PX = 96
 const ASPECT_MISMATCH_TOLERANCE = 0.04
+const CROP_PAN_MIN_OVERFLOW_PX = 1
+const CROP_CUSTOM_POSITION_EPSILON = 0.001
+
+export const DEFAULT_SLIDE_CROP_POSITION: Readonly<SlideCropPosition> = {
+  offsetX: 0,
+  offsetY: 0,
+}
+
+export interface CoverCropGeometry {
+  baseFitScale: number
+  maxShiftX: number
+  maxShiftY: number
+  canPanX: boolean
+  canPanY: boolean
+  canPan: boolean
+}
+
+/**
+ * Clamps a normalized crop axis offset to `[-1, 1]`, guarding against non-finite values.
+ */
+export function clampCropOffset(rawOffset: number): number {
+  if (!Number.isFinite(rawOffset)) return 0
+  return Math.max(-1, Math.min(1, rawOffset))
+}
+
+/**
+ * Returns true when a slide's crop framing has been shifted away from center.
+ */
+export function hasCustomCropPosition(cropPosition: SlideCropPosition | undefined): boolean {
+  if (!cropPosition) return false
+  return (
+    Math.abs(cropPosition.offsetX) > CROP_CUSTOM_POSITION_EPSILON ||
+    Math.abs(cropPosition.offsetY) > CROP_CUSTOM_POSITION_EPSILON
+  )
+}
+
+/**
+ * Resolves effective image dimensions after applying quarter-turn (90° or 270°) rotation.
+ */
+export function computeOrientedImageDimensions(
+  imageWidth: number,
+  imageHeight: number,
+  rotationDegrees: SlideRotationDegrees | number,
+): { orientedWidth: number; orientedHeight: number } {
+  const isQuarterTurnRotated = rotationDegrees === 90 || rotationDegrees === 270
+  return {
+    orientedWidth: isQuarterTurnRotated ? imageHeight : imageWidth,
+    orientedHeight: isQuarterTurnRotated ? imageWidth : imageHeight,
+  }
+}
+
+/**
+ * Computes the base `cover` (Crop Fill) scale and maximum safe pan range along each axis
+ * before exposing canvas edges. Shared between `SlideshowRenderer` and interactive preview dragging
+ * so preview repositioning and final video export stay pixel-accurate.
+ */
+export function computeCoverCropGeometry(
+  canvasWidth: number,
+  canvasHeight: number,
+  orientedImageWidth: number,
+  orientedImageHeight: number,
+): CoverCropGeometry {
+  if (
+    canvasWidth <= 0 ||
+    canvasHeight <= 0 ||
+    orientedImageWidth <= 0 ||
+    orientedImageHeight <= 0
+  ) {
+    return {
+      baseFitScale: 1,
+      maxShiftX: 0,
+      maxShiftY: 0,
+      canPanX: false,
+      canPanY: false,
+      canPan: false,
+    }
+  }
+
+  const baseFitScale = Math.max(
+    canvasWidth / orientedImageWidth,
+    canvasHeight / orientedImageHeight,
+  )
+  const maxShiftX = Math.max(0, (orientedImageWidth * baseFitScale - canvasWidth) / 2)
+  const maxShiftY = Math.max(0, (orientedImageHeight * baseFitScale - canvasHeight) / 2)
+  const canPanX = maxShiftX > CROP_PAN_MIN_OVERFLOW_PX
+  const canPanY = maxShiftY > CROP_PAN_MIN_OVERFLOW_PX
+
+  return {
+    baseFitScale,
+    maxShiftX,
+    maxShiftY,
+    canPanX,
+    canPanY,
+    canPan: canPanX || canPanY,
+  }
+}
+
+/**
+ * Computes the active Ken Burns zoom multiplier for a slide at `timeSeconds` so interactive
+ * drag deltas in the preview canvas map 1:1 to on-screen image motion even when Ken Burns is active.
+ */
+export function computeEffectiveKenBurnsScale(
+  timeline: ComputedTimeline,
+  timelineIndex: number,
+  timeSeconds: number,
+  effects: SmartEffectsConfig,
+): number {
+  const timelineSlide = timeline.slides[timelineIndex]
+  if (!timelineSlide || !effects.kenBurns) return 1
+  const slideProgress = computeSlideMotionProgress(timeline, timelineIndex, timeSeconds)
+  return computeKenBurnsTransform(timelineSlide.kenBurnsSeed, slideProgress, 1, 1, effects)
+    .scaleMultiplier
+}
+
+/**
+ * Converts a pointer drag delta (in canvas pixels) into an updated clamped `SlideCropPosition`.
+ */
+export function applyDragDeltaToCropPosition(params: {
+  currentCropPosition: SlideCropPosition
+  deltaCanvasX: number
+  deltaCanvasY: number
+  coverGeometry: CoverCropGeometry
+  scaleMultiplier: number
+}): SlideCropPosition {
+  const { currentCropPosition, deltaCanvasX, deltaCanvasY, coverGeometry, scaleMultiplier } = params
+  const effectiveScale = Math.max(1, scaleMultiplier)
+
+  const nextOffsetX = coverGeometry.canPanX
+    ? clampCropOffset(
+        currentCropPosition.offsetX + deltaCanvasX / (coverGeometry.maxShiftX * effectiveScale),
+      )
+    : clampCropOffset(currentCropPosition.offsetX)
+
+  const nextOffsetY = coverGeometry.canPanY
+    ? clampCropOffset(
+        currentCropPosition.offsetY + deltaCanvasY / (coverGeometry.maxShiftY * effectiveScale),
+      )
+    : clampCropOffset(currentCropPosition.offsetY)
+
+  return {
+    offsetX: nextOffsetX,
+    offsetY: nextOffsetY,
+  }
+}
 
 /**
  * Cubic ease-in-out curve (`[0, 1] -> [0, 1]`) for smooth, natural transition acceleration and deceleration.
@@ -428,9 +574,8 @@ export class SlideshowRenderer {
     const rotationDegrees = slide.rotation || 0
     const rotationRadians = (rotationDegrees * Math.PI) / 180
     // When rotated 90° or 270°, the image's effective horizontal and vertical dimensions swap
-    const isQuarterTurnRotated = rotationDegrees === 90 || rotationDegrees === 270
-    const orientedImageWidth = isQuarterTurnRotated ? imageBitmap.height : imageBitmap.width
-    const orientedImageHeight = isQuarterTurnRotated ? imageBitmap.width : imageBitmap.height
+    const { orientedWidth: orientedImageWidth, orientedHeight: orientedImageHeight } =
+      computeOrientedImageDimensions(imageBitmap.width, imageBitmap.height, rotationDegrees)
 
     const colorFilter = COLOR_LOOK_FILTERS[effects.colorLook] ?? 'none'
     const needsBackdrop = shouldRenderBlurredBackdrop(
@@ -474,6 +619,7 @@ export class SlideshowRenderer {
       effects.fitMode,
       needsBackdrop,
       kenBurnsTransform,
+      slide.cropPosition ?? DEFAULT_SLIDE_CROP_POSITION,
     )
 
     targetCtx.restore()
@@ -548,25 +694,56 @@ export class SlideshowRenderer {
     fitMode: FitMode,
     hasBlurredBackdrop: boolean,
     kenBurns: KenBurnsTransform,
+    cropPosition: SlideCropPosition,
   ) {
     targetCtx.save()
     if (colorFilter !== 'none') {
       targetCtx.filter = colorFilter
     }
 
-    const baseFitScale =
+    const coverGeometry =
       fitMode === 'cover'
-        ? Math.max(canvasWidth / orientedImageWidth, canvasHeight / orientedImageHeight)
-        : Math.min(canvasWidth / orientedImageWidth, canvasHeight / orientedImageHeight)
+        ? computeCoverCropGeometry(
+            canvasWidth,
+            canvasHeight,
+            orientedImageWidth,
+            orientedImageHeight,
+          )
+        : null
+
+    const baseFitScale = coverGeometry
+      ? coverGeometry.baseFitScale
+      : Math.min(canvasWidth / orientedImageWidth, canvasHeight / orientedImageHeight)
 
     const finalScale = baseFitScale * kenBurns.scaleMultiplier
     const drawWidth = imageBitmap.width * finalScale
     const drawHeight = imageBitmap.height * finalScale
 
-    targetCtx.translate(
-      canvasWidth / 2 + kenBurns.offsetX,
-      canvasHeight / 2 + kenBurns.offsetY,
-    )
+    let translateOffsetX = kenBurns.offsetX
+    let translateOffsetY = kenBurns.offsetY
+
+    if (coverGeometry) {
+      // Scale the user's crop shift by Ken Burns zoom so zooming stays centered on the user's chosen
+      // focal point, then clamp combined crop + Ken Burns translation inside the scaled overflow bounds
+      // so edge-aligned crops never expose empty background strips.
+      const cropShiftX =
+        clampCropOffset(cropPosition.offsetX) * coverGeometry.maxShiftX * kenBurns.scaleMultiplier
+      const cropShiftY =
+        clampCropOffset(cropPosition.offsetY) * coverGeometry.maxShiftY * kenBurns.scaleMultiplier
+      const maxTotalOffsetX = Math.max(0, (orientedImageWidth * finalScale - canvasWidth) / 2)
+      const maxTotalOffsetY = Math.max(0, (orientedImageHeight * finalScale - canvasHeight) / 2)
+
+      translateOffsetX = Math.max(
+        -maxTotalOffsetX,
+        Math.min(maxTotalOffsetX, cropShiftX + kenBurns.offsetX),
+      )
+      translateOffsetY = Math.max(
+        -maxTotalOffsetY,
+        Math.min(maxTotalOffsetY, cropShiftY + kenBurns.offsetY),
+      )
+    }
+
+    targetCtx.translate(canvasWidth / 2 + translateOffsetX, canvasHeight / 2 + translateOffsetY)
     targetCtx.rotate(rotationRadians)
 
     if (hasBlurredBackdrop) {

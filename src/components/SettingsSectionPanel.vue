@@ -203,6 +203,9 @@ function submitMusicUrl() {
           {{ mode.label }}
         </button>
       </div>
+      <p v-if="props.effects.fitMode === 'cover'" class="mt-1.5 text-[11px] text-zinc-500">
+        Drag any photo in the preview to adjust its crop framing.
+      </p>
     </div>
 
     <!-- Ken Burns -->
