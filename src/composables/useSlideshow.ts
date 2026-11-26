@@ -38,7 +38,12 @@ import {
   detectBeats,
   fetchAndDecodeAudioFromUrl,
 } from '../engine/audioEngine'
-import { isImageFile } from '../utils/fileDrop'
+import {
+  formatRejectedFilesNotice,
+  partitionSupportedImageFiles,
+} from '../utils/fileDrop'
+
+const REJECTED_FILES_NOTICE_DURATION_MS = 7000
 
 let slideIdSequence = 1
 let musicAssetIdSequence = 1
@@ -88,6 +93,35 @@ export function useSlideshow() {
   const currentTime = ref(0)
   const isPlaying = ref(false)
   const isMuted = ref(false)
+  const rejectedFilesNotice = ref<string | null>(null)
+  let accumulatedRejectedFiles: File[] = []
+  let rejectedNoticeTimerId: ReturnType<typeof setTimeout> | null = null
+
+  function dismissRejectedFilesNotice() {
+    if (rejectedNoticeTimerId !== null) {
+      clearTimeout(rejectedNoticeTimerId)
+      rejectedNoticeTimerId = null
+    }
+    accumulatedRejectedFiles = []
+    rejectedFilesNotice.value = null
+  }
+
+  function reportRejectedFiles(rejectedFiles: File[]) {
+    if (rejectedFiles.length === 0) return
+
+    if (rejectedFilesNotice.value === null) {
+      accumulatedRejectedFiles = []
+    }
+    accumulatedRejectedFiles.push(...rejectedFiles)
+    rejectedFilesNotice.value = formatRejectedFilesNotice(accumulatedRejectedFiles)
+
+    if (rejectedNoticeTimerId !== null) {
+      clearTimeout(rejectedNoticeTimerId)
+    }
+    rejectedNoticeTimerId = setTimeout(() => {
+      dismissRejectedFilesNotice()
+    }, REJECTED_FILES_NOTICE_DURATION_MS)
+  }
 
   const timing = reactive<TimingConfig>({
     slideDuration: 3.0,
@@ -211,15 +245,27 @@ export function useSlideshow() {
             URL.revokeObjectURL(thumbnailBlobUrl)
           }
         },
+        () => {
+          // Reject files the browser cannot decode (e.g. corrupt files or renamed RAW images)
+          // so they never persist as broken thumbnails or black video frames.
+          const failedSlide = slides.value.find((item) => item.id === slide.id)
+          if (failedSlide) {
+            removeSlide(failedSlide.id)
+            reportRejectedFiles([failedSlide.file])
+          }
+        },
       )
     }
   }
 
   function addFiles(inputFiles: FileList | File[]) {
-    const validImageFiles = Array.from(inputFiles).filter(isImageFile)
-    if (validImageFiles.length === 0) return
+    const { supportedFiles, rejectedFiles } = partitionSupportedImageFiles(Array.from(inputFiles))
+    if (rejectedFiles.length > 0) {
+      reportRejectedFiles(rejectedFiles)
+    }
+    if (supportedFiles.length === 0) return
 
-    const newSlides = validImageFiles.map(createSlideImageFromFile)
+    const newSlides = supportedFiles.map(createSlideImageFromFile)
     slides.value = [...slides.value, ...newSlides]
 
     scheduleDuplicateDetectionForSlides()
@@ -298,6 +344,7 @@ export function useSlideshow() {
   function clearAllSlides() {
     isPlaying.value = false
     currentTime.value = 0
+    dismissRejectedFilesNotice()
     thumbnailQueue.clear()
     contentHashQueue.clear()
     for (const slide of slides.value) {
@@ -613,6 +660,7 @@ export function useSlideshow() {
     currentTime,
     isPlaying,
     isMuted,
+    rejectedFilesNotice,
     timing,
     selectedTransitions,
     transitionOrder,
@@ -625,6 +673,7 @@ export function useSlideshow() {
     activeSlideIndex,
     duplicateAnalysis,
     addFiles,
+    dismissRejectedFilesNotice,
     removeSlide,
     removeDuplicateSlides,
     rotateSlide,

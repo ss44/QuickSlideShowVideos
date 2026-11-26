@@ -22,6 +22,7 @@ const {
   currentTime,
   isPlaying,
   isMuted,
+  rejectedFilesNotice,
   timing,
   selectedTransitions,
   transitionOrder,
@@ -34,6 +35,7 @@ const {
   activeSlideIndex,
   duplicateAnalysis,
   addFiles,
+  dismissRejectedFilesNotice,
   removeSlide,
   removeDuplicateSlides,
   rotateSlide,
@@ -306,10 +308,12 @@ onBeforeUnmount(() => {
           :active-slide-index="activeSlideIndex"
           :saved-projects="savedProjects"
           :opening-project-id="isOpeningProjectId"
+          :rejected-files-notice="rejectedFilesNotice"
           @update:current-time="currentTime = $event"
           @update:is-playing="isPlaying = $event"
           @update:is-muted="isMuted = $event"
           @add-files="addFiles"
+          @dismiss-rejected-files-notice="dismissRejectedFilesNotice"
           @open-saved-project="openSavedProject"
           @open-projects-modal="openProjectsModal"
         />

@@ -12,6 +12,8 @@ import {
   Sparkles,
   Images,
   Loader2,
+  AlertTriangle,
+  X,
 } from 'lucide-vue-next'
 import type {
   ComputedTimeline,
@@ -26,7 +28,7 @@ import { SlideshowRenderer } from '../engine/renderer'
 import { PreviewAudioPlayer } from '../engine/audioEngine'
 import { findSlideIndexAtTime } from '../engine/timeline'
 import { formatRelativeTimestamp, formatTime } from '../utils/formatters'
-import { extractImagesFromDrop } from '../utils/fileDrop'
+import { extractFilesFromDrop, SUPPORTED_IMAGE_INPUT_ACCEPT } from '../utils/fileDrop'
 
 const PREVIEW_MAX_RENDER_DIMENSION_PX = 960
 const PREVIEW_LOOKAHEAD_SLIDE_COUNT = 3
@@ -43,6 +45,7 @@ const props = defineProps<{
   activeSlideIndex: number
   savedProjects: SavedProjectSummary[]
   openingProjectId: string | null
+  rejectedFilesNotice: string | null
 }>()
 
 const emit = defineEmits<{
@@ -50,6 +53,7 @@ const emit = defineEmits<{
   (e: 'update:isPlaying', playing: boolean): void
   (e: 'update:isMuted', muted: boolean): void
   (e: 'addFiles', files: File[]): void
+  (e: 'dismissRejectedFilesNotice'): void
   (e: 'openSavedProject', projectId: string): void
   (e: 'openProjectsModal'): void
 }>()
@@ -317,7 +321,7 @@ async function onDrop(event: DragEvent) {
   event.preventDefault()
   isDraggingOver.value = false
   if (!event.dataTransfer) return
-  const droppedFiles = await extractImagesFromDrop(event.dataTransfer)
+  const droppedFiles = await extractFilesFromDrop(event.dataTransfer)
   if (droppedFiles.length > 0) emit('addFiles', droppedFiles)
 }
 
@@ -377,7 +381,7 @@ defineExpose({ openFilePicker, clearBitmapCache })
     <input
       ref="fileInputRef"
       type="file"
-      accept="image/*"
+      :accept="SUPPORTED_IMAGE_INPUT_ACCEPT"
       multiple
       class="hidden"
       @change="onFileChange"
@@ -385,12 +389,31 @@ defineExpose({ openFilePicker, clearBitmapCache })
     <input
       ref="folderInputRef"
       type="file"
-      accept="image/*"
+      :accept="SUPPORTED_IMAGE_INPUT_ACCEPT"
       webkitdirectory
       multiple
       class="hidden"
       @change="onFileChange"
     />
+
+    <!-- Skipped / Unsupported Files Notice -->
+    <div
+      v-if="props.rejectedFilesNotice"
+      role="status"
+      aria-live="polite"
+      class="absolute top-3 left-1/2 z-30 flex w-[calc(100%-1.5rem)] max-w-lg -translate-x-1/2 items-start gap-2.5 rounded-xl border border-amber-500/40 bg-zinc-900/95 px-3.5 py-2.5 text-xs text-amber-100 shadow-xl shadow-black/60 backdrop-blur"
+    >
+      <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+      <p class="min-w-0 flex-1 leading-relaxed">{{ props.rejectedFilesNotice }}</p>
+      <button
+        type="button"
+        class="shrink-0 rounded p-0.5 text-amber-300/80 transition hover:bg-amber-500/15 hover:text-amber-100"
+        aria-label="Dismiss unsupported files notice"
+        @click="emit('dismissRejectedFilesNotice')"
+      >
+        <X class="h-3.5 w-3.5" />
+      </button>
+    </div>
 
     <!-- Empty Drop State -->
     <div
