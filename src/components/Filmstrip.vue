@@ -210,18 +210,11 @@ function getSlideCardBorderClass(slide: SlideImage, slideIndex: number): string 
               v-for="sortOption in SLIDE_SORT_OPTIONS"
               :key="sortOption.id"
               type="button"
-              class="block w-full px-3 py-2 text-left text-xs text-zinc-200 hover:bg-zinc-800 sm:py-1.5"
+              class="flex w-full items-center gap-1.5 px-3 py-2 text-left text-xs text-zinc-200 hover:bg-zinc-800 sm:py-1.5"
               @click="applySortMode(sortOption.id)"
             >
+              <Shuffle v-if="sortOption.id === 'random'" class="h-3 w-3 shrink-0 text-indigo-400" />
               {{ sortOption.label }}
-            </button>
-            <button
-              type="button"
-              class="flex w-full items-center gap-1.5 px-3 py-2 text-left text-xs text-zinc-200 hover:bg-zinc-800 sm:py-1.5"
-              @click="applySortMode('shuffle')"
-            >
-              <Shuffle class="h-3 w-3 text-indigo-400" />
-              Shuffle
             </button>
           </div>
         </div>
