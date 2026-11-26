@@ -8,9 +8,11 @@ import MobileSettingsDrawer from './components/MobileSettingsDrawer.vue'
 import Filmstrip from './components/Filmstrip.vue'
 import ExportModal from './components/ExportModal.vue'
 import ProjectsModal from './components/ProjectsModal.vue'
+import WelcomeModal from './components/WelcomeModal.vue'
 import { useSlideshow } from './composables/useSlideshow'
 import { usePwaInstall } from './composables/usePwaInstall'
 import { useProjectLibrary } from './composables/useProjectLibrary'
+import { useFirstVisitWelcome } from './composables/useFirstVisitWelcome'
 import { exportSlideshowVideo } from './engine/exporter'
 import type { SettingsSectionId } from './config/settingsSections'
 import type { ExportProgress } from './types/slideshow'
@@ -56,6 +58,8 @@ const {
   promptInstall,
   closeIosInstructions,
 } = usePwaInstall()
+
+const { isWelcomeOpen, dismissWelcome } = useFirstVisitWelcome()
 
 const previewStageRef = ref<InstanceType<typeof PreviewStage> | null>(null)
 const isExportModalOpen = ref(false)
@@ -209,6 +213,8 @@ function handleClearAllSlides() {
 }
 
 function onGlobalKeyDown(event: KeyboardEvent) {
+  if (isWelcomeOpen.value) return
+
   const isSaveShortcut = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's'
   if (isSaveShortcut && !isExportModalOpen.value) {
     if (slides.value.length > 0) {
@@ -410,5 +416,7 @@ onBeforeUnmount(() => {
       @rename-project="({ projectId, name }) => renameSavedProject(projectId, name)"
       @delete-project="deleteSavedProject"
     />
+
+    <WelcomeModal :open="isWelcomeOpen" @get-started="dismissWelcome" />
   </div>
 </template>
