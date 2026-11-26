@@ -6,7 +6,7 @@ A fast, **100% In Browser Slide Show Maker** built with Vue 3, TypeScript, Canva
 
 ## Features
 
-- **Bulk Photo Drop & Reorder** — Drag in dozens or hundreds of photos (or a whole folder), reorder via drag-and-drop, expand to a grid, rotate, or sort (Name, Date, Reverse, Shuffle).
+- **Bulk Photo Drop & Reorder** — Drag in dozens or hundreds of photos (or a whole folder), reorder via drag-and-drop, expand to a grid, rotate, or sort (Name, Date, Reverse, Random).
 - **Live WYSIWYG Preview** — Real-time playback with timeline scrubber, audio sync, and live duration & file-size estimates.
 - **11 Transitions** — Crossfade, Cut, Slide (Left/Right/Up), Push, Zoom In/Out, Blur Dissolve, Dip to Black, and Wipe (Cycle or Random order).
 - **Smart Effects** — **Blur Fill** backdrop for portrait/mixed-orientation photos, **Ken Burns** auto pan & zoom, **Beat Sync** (Web Audio beat detection), Color Looks, and Vignette.

@@ -42,6 +42,7 @@ import {
   formatRejectedFilesNotice,
   partitionSupportedImageFiles,
 } from '../utils/fileDrop'
+import { computeSortedSlides } from '../utils/slideSort'
 
 const REJECTED_FILES_NOTICE_DURATION_MS = 7000
 
@@ -323,22 +324,7 @@ export function useSlideshow() {
   }
 
   function sortSlides(sortMode: SlideSortMode) {
-    const sorted = slides.value.slice()
-    if (sortMode === 'name') {
-      sorted.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
-    } else if (sortMode === 'date-asc') {
-      sorted.sort((a, b) => a.lastModified - b.lastModified)
-    } else if (sortMode === 'date-desc') {
-      sorted.sort((a, b) => b.lastModified - a.lastModified)
-    } else if (sortMode === 'reverse') {
-      sorted.reverse()
-    } else if (sortMode === 'shuffle') {
-      for (let i = sorted.length - 1; i > 0; i--) {
-        const randomIndex = Math.floor(Math.random() * (i + 1))
-        ;[sorted[i], sorted[randomIndex]] = [sorted[randomIndex], sorted[i]]
-      }
-    }
-    slides.value = sorted
+    slides.value = computeSortedSlides(slides.value, sortMode)
   }
 
   function clearAllSlides() {
