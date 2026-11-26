@@ -17,6 +17,7 @@ import {
 } from 'lucide-vue-next'
 import type {
   ComputedTimeline,
+  ImageQualityAnalysis,
   MusicConfig,
   OutputConfig,
   SlideImage,
@@ -24,6 +25,10 @@ import type {
 } from '../types/slideshow'
 import type { SavedProjectSummary } from '../types/project'
 import { BitmapCache } from '../engine/imageCache'
+import {
+  describeSlideQualityIssues,
+  formatQualityIssueBadgeLabel,
+} from '../engine/imageQualityAnalyzer'
 import { SlideshowRenderer } from '../engine/renderer'
 import { PreviewAudioPlayer } from '../engine/audioEngine'
 import { computeSlideSeekTimeSeconds, findSlideIndexAtTime } from '../engine/timeline'
@@ -44,6 +49,7 @@ const props = defineProps<{
   isPlaying: boolean
   isMuted: boolean
   activeSlideIndex: number
+  qualityAnalysis: ImageQualityAnalysis
   savedProjects: SavedProjectSummary[]
   openingProjectId: string | null
   rejectedFilesNotice: string | null
@@ -149,6 +155,17 @@ watch(canvasViewportRef, (viewportElement) => {
 const timelineProgressPercent = computed(() => {
   if (props.timeline.totalDuration <= 0) return 0
   return Math.min(100, Math.max(0, (props.currentTime / props.timeline.totalDuration) * 100))
+})
+
+const activeSlideQualityWarning = computed(() => {
+  const activeSlide = props.slides[props.activeSlideIndex]
+  if (!activeSlide) return null
+  const assessment = props.qualityAnalysis.assessmentBySlideId.get(activeSlide.id)
+  if (!assessment || assessment.issues.length === 0) return null
+  return {
+    label: formatQualityIssueBadgeLabel(assessment),
+    details: describeSlideQualityIssues(activeSlide, assessment, props.output),
+  }
 })
 
 async function renderFrameAtTime(timeSeconds: number) {
@@ -563,6 +580,16 @@ defineExpose({ openFilePicker, clearBitmapCache })
             <span>Slide {{ props.activeSlideIndex + 1 }} / {{ props.slides.length }}</span>
             <span class="text-zinc-500">·</span>
             <span class="text-zinc-400">{{ props.output.width }}×{{ props.output.height }}</span>
+          </div>
+
+          <!-- Top-right quality warning pill (editor overlay only; never rendered onto exported video) -->
+          <div
+            v-if="activeSlideQualityWarning"
+            :title="activeSlideQualityWarning.details"
+            class="absolute top-2 right-2 flex items-center gap-1 rounded-md border border-yellow-400/50 bg-black/75 px-2 py-0.5 text-[10px] font-semibold text-yellow-300 backdrop-blur-sm sm:top-3 sm:right-3 sm:gap-1.5 sm:px-2.5 sm:py-1 sm:text-[11px]"
+          >
+            <AlertTriangle class="h-3 w-3 shrink-0 text-yellow-400" />
+            <span>{{ activeSlideQualityWarning.label }}</span>
           </div>
         </div>
       </div>

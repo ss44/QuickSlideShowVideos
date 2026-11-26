@@ -1,5 +1,6 @@
 import type { ComputedTimeline, PerceptualFingerprint, SlideImage } from '../types/slideshow'
 import { computePerceptualFingerprintFromBitmap } from './duplicateDetector'
+import { computeSharpnessScoreFromBitmap } from './imageQualityAnalyzer'
 
 const THUMBNAIL_MAX_DIMENSION_PX = 220
 const THUMBNAIL_JPEG_QUALITY = 0.78
@@ -16,6 +17,7 @@ type ThumbnailCompletionCallback = (
   naturalWidth: number,
   naturalHeight: number,
   perceptualFingerprint: PerceptualFingerprint | null,
+  sharpnessScore: number | null,
 ) => void
 
 type ThumbnailErrorCallback = () => void
@@ -76,6 +78,7 @@ class ThumbnailQueue {
               result.naturalWidth,
               result.naturalHeight,
               result.perceptualFingerprint,
+              result.sharpnessScore,
             )
           } else {
             nextJob.onError?.()
@@ -98,6 +101,7 @@ class ThumbnailQueue {
     naturalWidth: number
     naturalHeight: number
     perceptualFingerprint: PerceptualFingerprint | null
+    sharpnessScore: number | null
   } | null> {
     const decodedBitmap = await decodeOrientedImageBitmap(slide.file)
     const naturalWidth = decodedBitmap.width
@@ -125,8 +129,10 @@ class ThumbnailQueue {
     }
 
     thumbCtx.drawImage(decodedBitmap, 0, 0, thumbWidth, thumbHeight)
-    // Piggyback perceptual fingerprinting on the already-decoded EXIF-oriented bitmap (zero extra decodes)
+    // Piggyback perceptual fingerprinting and blur/sharpness analysis on the already-decoded
+    // EXIF-oriented bitmap so hundreds of photos require zero extra image decodes
     const perceptualFingerprint = computePerceptualFingerprintFromBitmap(decodedBitmap)
+    const sharpnessScore = computeSharpnessScoreFromBitmap(decodedBitmap)
     decodedBitmap.close()
 
     const jpegBlob = await new Promise<Blob | null>((resolve) =>
@@ -139,6 +145,7 @@ class ThumbnailQueue {
       naturalWidth,
       naturalHeight,
       perceptualFingerprint,
+      sharpnessScore,
     }
   }
 }

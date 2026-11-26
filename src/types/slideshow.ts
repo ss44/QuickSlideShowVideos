@@ -85,6 +85,26 @@ export interface DuplicateDetectionConfig {
   similarityThresholdPercent: number
 }
 
+export type ImageQualityIssue = 'low-res' | 'blurry'
+
+export interface SlideQualityAssessment {
+  slideId: string
+  isLowRes: boolean
+  isBlurry: boolean
+  issues: ImageQualityIssue[]
+  /** Effective linear upscale multiplier onto the current render output (1.0 = native 1:1, >1.0 = upscaled). */
+  effectiveUpscaleFactor: number
+  sharpnessScore: number | null
+}
+
+export interface ImageQualityAnalysis {
+  flaggedSlideIds: Set<string>
+  assessmentBySlideId: Map<string, SlideQualityAssessment>
+  flaggedCount: number
+  lowResCount: number
+  blurryCount: number
+}
+
 export interface SlideImage {
   id: string
   file: File
@@ -97,6 +117,8 @@ export interface SlideImage {
   rotation: SlideRotationDegrees
   contentHash: string | null
   perceptualFingerprint: PerceptualFingerprint | null
+  /** Normalized 0–100 sharpness metric computed during thumbnail decode; null if unmeasured or featureless. */
+  sharpnessScore: number | null
 }
 
 export interface DuplicateAnalysis {

@@ -24,6 +24,7 @@ export interface SavedSlideRecord {
   rotation: SlideRotationDegrees
   contentHash: string | null
   perceptualFingerprint: PerceptualFingerprint | null
+  sharpnessScore?: number | null
 }
 
 export interface SavedMusicRecord {
