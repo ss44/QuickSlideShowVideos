@@ -4,6 +4,7 @@ import { ABOUT_LINKS } from '../config/aboutLinks'
 
 const props = defineProps<{
   isOpen: boolean
+  hideHeader?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -14,6 +15,7 @@ const emit = defineEmits<{
 <template>
   <div>
     <button
+      v-if="!props.hideHeader"
       type="button"
       class="flex w-full items-center justify-between px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-zinc-300 hover:bg-zinc-900/50"
       :aria-expanded="props.isOpen"
@@ -29,7 +31,11 @@ const emit = defineEmits<{
       />
     </button>
 
-    <div v-if="props.isOpen" class="space-y-3 px-4 pb-5">
+    <div
+      v-if="props.hideHeader || props.isOpen"
+      class="space-y-3"
+      :class="props.hideHeader ? '' : 'px-4 pb-5'"
+    >
       <p class="text-[11px] leading-relaxed text-zinc-400">
         100% browser-based slideshow studio. Photos and audio are processed locally on your device.
       </p>

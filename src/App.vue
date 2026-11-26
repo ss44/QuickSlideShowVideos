@@ -3,6 +3,8 @@ import { onBeforeUnmount, onMounted, ref } from 'vue'
 import TopBar from './components/TopBar.vue'
 import PreviewStage from './components/PreviewStage.vue'
 import SettingsSidebar from './components/SettingsSidebar.vue'
+import MobileSettingsBar from './components/MobileSettingsBar.vue'
+import MobileSettingsDrawer from './components/MobileSettingsDrawer.vue'
 import Filmstrip from './components/Filmstrip.vue'
 import ExportModal from './components/ExportModal.vue'
 import ProjectsModal from './components/ProjectsModal.vue'
@@ -10,6 +12,7 @@ import { useSlideshow } from './composables/useSlideshow'
 import { usePwaInstall } from './composables/usePwaInstall'
 import { useProjectLibrary } from './composables/useProjectLibrary'
 import { exportSlideshowVideo } from './engine/exporter'
+import type { SettingsSectionId } from './config/settingsSections'
 import type { ExportProgress } from './types/slideshow'
 
 const {
@@ -57,7 +60,17 @@ const {
 const previewStageRef = ref<InstanceType<typeof PreviewStage> | null>(null)
 const isExportModalOpen = ref(false)
 const exportProgress = ref<ExportProgress | null>(null)
+const activeMobileSettingsSection = ref<SettingsSectionId | null>(null)
 let activeExportAbortController: AbortController | null = null
+
+function toggleMobileSettingsSection(sectionId: SettingsSectionId) {
+  activeMobileSettingsSection.value =
+    activeMobileSettingsSection.value === sectionId ? null : sectionId
+}
+
+function closeMobileSettingsDrawer() {
+  activeMobileSettingsSection.value = null
+}
 
 const {
   isStorageSupported,
@@ -205,12 +218,22 @@ function onGlobalKeyDown(event: KeyboardEvent) {
     return
   }
 
-  if (event.code === 'Escape' && isProjectsModalOpen.value) {
-    closeProjectsModal()
-    return
+  if (event.code === 'Escape') {
+    if (isProjectsModalOpen.value) {
+      closeProjectsModal()
+      return
+    }
+    if (activeMobileSettingsSection.value !== null) {
+      closeMobileSettingsDrawer()
+      return
+    }
   }
 
-  if (isEditableFormElement(event.target) || isExportModalOpen.value || isProjectsModalOpen.value) {
+  if (
+    isEditableFormElement(event.target) ||
+    isExportModalOpen.value ||
+    isProjectsModalOpen.value
+  ) {
     return
   }
   if (slides.value.length === 0) return
@@ -238,7 +261,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="flex h-screen w-screen flex-col overflow-hidden bg-zinc-950 text-zinc-100">
+  <div class="flex h-dvh w-full flex-col overflow-hidden bg-zinc-950 text-zinc-100">
     <TopBar
       :slide-count="slides.length"
       :total-duration="timeline.totalDuration"
@@ -261,9 +284,9 @@ onBeforeUnmount(() => {
       @open-projects="openProjectsModal"
     />
 
-    <div class="flex min-h-0 flex-1 flex-col overflow-y-auto md:flex-row md:overflow-hidden">
+    <div class="relative flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
       <!-- Left/Center Workspace: Preview + Filmstrip -->
-      <main class="flex min-h-[480px] min-w-0 shrink-0 flex-1 flex-col md:min-h-0 md:shrink">
+      <main class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <PreviewStage
           ref="previewStageRef"
           :slides="slides"
@@ -300,7 +323,7 @@ onBeforeUnmount(() => {
         />
       </main>
 
-      <!-- Right Sidebar: Controls -->
+      <!-- Desktop Right Sidebar: Collapsible Controls -->
       <SettingsSidebar
         :timing="timing"
         :selected-transitions="selectedTransitions"
@@ -320,7 +343,38 @@ onBeforeUnmount(() => {
         @clear-music="clearMusic"
         @set-resolution-preset="setResolutionPreset"
       />
+
+      <!-- Mobile Slide-Out Settings Drawer (slides in from the right above the bottom tab bar) -->
+      <MobileSettingsDrawer
+        :active-section="activeMobileSettingsSection"
+        :timing="timing"
+        :selected-transitions="selectedTransitions"
+        :transition-order="transitionOrder"
+        :effects="effects"
+        :music="music"
+        :output="output"
+        :duplicate-detection="duplicateDetection"
+        :removable-duplicate-count="duplicateAnalysis.removableCount"
+        @close="closeMobileSettingsDrawer"
+        @toggle-transition="toggleTransition"
+        @select-all-transitions="selectAllTransitions"
+        @update:transition-order="transitionOrder = $event"
+        @load-music-file="loadMusicFile"
+        @load-music-url="loadMusicUrl"
+        @clear-music="clearMusic"
+        @set-resolution-preset="setResolutionPreset"
+      />
     </div>
+
+    <!-- Mobile Fixed Bottom Settings Tab Bar -->
+    <MobileSettingsBar
+      :active-section="activeMobileSettingsSection"
+      :selected-transition-count="selectedTransitions.length"
+      :has-music-loaded="Boolean(music.audioBuffer)"
+      :duplicate-finder-enabled="duplicateDetection.enabled"
+      :removable-duplicate-count="duplicateAnalysis.removableCount"
+      @toggle-section="toggleMobileSettingsSection"
+    />
 
     <ExportModal
       :open="isExportModalOpen"

@@ -41,13 +41,13 @@ const estimatedRemainingText = computed(() => {
   <Teleport to="body">
     <div
       v-if="props.open && props.progress"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-3 backdrop-blur-sm sm:p-4"
     >
       <div
-        class="w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-950 p-6 shadow-2xl"
+        class="max-h-[90dvh] w-full max-w-md overflow-y-auto rounded-2xl border border-zinc-800 bg-zinc-950 p-4 shadow-2xl sm:p-6"
       >
-        <div class="flex items-start justify-between">
-          <div>
+        <div class="flex items-start justify-between gap-2">
+          <div class="min-w-0">
             <h3 class="text-base font-semibold text-zinc-100">
               <span v-if="props.progress.phase === 'done'">Video Ready!</span>
               <span v-else-if="props.progress.phase === 'error'">Export Failed</span>
@@ -62,7 +62,8 @@ const estimatedRemainingText = computed(() => {
           <button
             v-if="!isEncodingInProgress"
             type="button"
-            class="rounded-lg p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+            class="rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+            aria-label="Close export modal"
             @click="emit('close')"
           >
             <X class="h-4 w-4" />
@@ -70,13 +71,15 @@ const estimatedRemainingText = computed(() => {
         </div>
 
         <!-- Active Progress -->
-        <div v-if="isEncodingInProgress" class="mt-6 space-y-3">
-          <div class="flex items-center justify-between text-xs">
-            <span class="flex items-center gap-2 text-zinc-300">
-              <Loader2 class="h-3.5 w-3.5 animate-spin text-indigo-400" />
-              {{ props.progress.message }}
+        <div v-if="isEncodingInProgress" class="mt-5 space-y-3 sm:mt-6">
+          <div class="flex items-center justify-between gap-2 text-xs">
+            <span class="flex min-w-0 items-center gap-2 text-zinc-300">
+              <Loader2 class="h-3.5 w-3.5 shrink-0 animate-spin text-indigo-400" />
+              <span class="truncate">{{ props.progress.message }}</span>
             </span>
-            <span class="font-mono font-semibold text-indigo-300">{{ props.progress.percent }}%</span>
+            <span class="shrink-0 font-mono font-semibold tabular-nums text-indigo-300">
+              {{ props.progress.percent }}%
+            </span>
           </div>
 
           <div class="h-2.5 w-full overflow-hidden rounded-full bg-zinc-800">
@@ -86,7 +89,7 @@ const estimatedRemainingText = computed(() => {
             />
           </div>
 
-          <div class="flex items-center justify-between text-[11px] text-zinc-500">
+          <div class="flex items-center justify-between text-[11px] tabular-nums text-zinc-500">
             <span>Elapsed: {{ formatTime(Math.floor(props.progress.elapsedMs / 1000)) }}</span>
             <span>{{ estimatedRemainingText }}</span>
           </div>
@@ -98,7 +101,7 @@ const estimatedRemainingText = computed(() => {
           <div class="flex justify-end pt-1">
             <button
               type="button"
-              class="rounded-lg border border-zinc-700 bg-zinc-900 px-3.5 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
+              class="rounded-lg border border-zinc-700 bg-zinc-900 px-3.5 py-2 text-xs font-medium text-zinc-300 hover:bg-zinc-800 sm:py-1.5"
               @click="emit('cancel')"
             >
               Cancel Export
@@ -107,7 +110,7 @@ const estimatedRemainingText = computed(() => {
         </div>
 
         <!-- Done -->
-        <div v-else-if="props.progress.phase === 'done'" class="mt-6 space-y-4">
+        <div v-else-if="props.progress.phase === 'done'" class="mt-5 space-y-4 sm:mt-6">
           <div
             class="flex items-center gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3.5"
           >
@@ -121,17 +124,17 @@ const estimatedRemainingText = computed(() => {
             </div>
           </div>
 
-          <div class="flex items-center justify-end gap-2">
+          <div class="flex flex-wrap items-center justify-end gap-2">
             <button
               type="button"
-              class="rounded-lg border border-zinc-700 bg-zinc-900 px-3.5 py-2 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
+              class="rounded-lg border border-zinc-700 bg-zinc-900 px-3.5 py-2.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800 sm:py-2"
               @click="emit('close')"
             >
               Done
             </button>
             <button
               type="button"
-              class="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-500"
+              class="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2.5 text-xs font-semibold text-white hover:bg-indigo-500 sm:py-2"
               @click="emit('downloadAgain')"
             >
               <Download class="h-3.5 w-3.5" />
