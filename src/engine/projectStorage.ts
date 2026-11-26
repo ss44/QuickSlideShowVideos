@@ -153,6 +153,7 @@ function toPlainSavedSlideRecord(slide: SlideImage): SavedSlideRecord {
           avgBlue: slide.perceptualFingerprint.avgBlue,
         }
       : null,
+    sharpnessScore: slide.sharpnessScore,
   }
 }
 

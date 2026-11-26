@@ -30,6 +30,7 @@ import {
   contentHashQueue,
   findSlidesRequiringHash,
 } from '../engine/duplicateDetector'
+import { analyzeSlidesQuality } from '../engine/imageQualityAnalyzer'
 import {
   computeSlideSeekTimeSeconds,
   computeTimeline,
@@ -45,6 +46,7 @@ import {
   formatRejectedFilesNotice,
   partitionSupportedImageFiles,
 } from '../utils/fileDrop'
+import { computeSortedSlides } from '../utils/slideSort'
 
 const REJECTED_FILES_NOTICE_DURATION_MS = 7000
 
@@ -77,6 +79,7 @@ function createSlideImageFromFile(file: File): SlideImage {
     cropPosition: { offsetX: 0, offsetY: 0 },
     contentHash: null,
     perceptualFingerprint: null,
+    sharpnessScore: null,
   }
 }
 
@@ -199,6 +202,8 @@ export function useSlideshow() {
     analyzeSlideDuplicates(slides.value, duplicateDetection),
   )
 
+  const qualityAnalysis = computed(() => analyzeSlidesQuality(slides.value, output, effects))
+
   function clampPlaybackStateAfterRemoval() {
     if (currentTime.value > timeline.value.totalDuration) {
       currentTime.value = Math.max(0, timeline.value.totalDuration - 0.01)
@@ -235,7 +240,13 @@ export function useSlideshow() {
     for (const slide of targetSlides) {
       thumbnailQueue.enqueue(
         slide,
-        (thumbnailBlobUrl, naturalWidth, naturalHeight, perceptualFingerprint) => {
+        (
+          thumbnailBlobUrl,
+          naturalWidth,
+          naturalHeight,
+          perceptualFingerprint,
+          sharpnessScore,
+        ) => {
           const targetSlide = slides.value.find((item) => item.id === slide.id)
           if (targetSlide) {
             targetSlide.thumbnailUrl = thumbnailBlobUrl
@@ -244,6 +255,7 @@ export function useSlideshow() {
             if (perceptualFingerprint) {
               targetSlide.perceptualFingerprint = perceptualFingerprint
             }
+            targetSlide.sharpnessScore = sharpnessScore
           } else {
             // Slide was removed before its asynchronous thumbnail completed
             URL.revokeObjectURL(thumbnailBlobUrl)
@@ -341,22 +353,7 @@ export function useSlideshow() {
   }
 
   function sortSlides(sortMode: SlideSortMode) {
-    const sorted = slides.value.slice()
-    if (sortMode === 'name') {
-      sorted.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
-    } else if (sortMode === 'date-asc') {
-      sorted.sort((a, b) => a.lastModified - b.lastModified)
-    } else if (sortMode === 'date-desc') {
-      sorted.sort((a, b) => b.lastModified - a.lastModified)
-    } else if (sortMode === 'reverse') {
-      sorted.reverse()
-    } else if (sortMode === 'shuffle') {
-      for (let i = sorted.length - 1; i > 0; i--) {
-        const randomIndex = Math.floor(Math.random() * (i + 1))
-        ;[sorted[i], sorted[randomIndex]] = [sorted[randomIndex], sorted[i]]
-      }
-    }
-    slides.value = sorted
+    slides.value = computeSortedSlides(slides.value, sortMode)
   }
 
   function clearAllSlides() {
@@ -606,6 +603,7 @@ export function useSlideshow() {
       },
       contentHash: record.contentHash ?? null,
       perceptualFingerprint: record.perceptualFingerprint ?? null,
+      sharpnessScore: record.sharpnessScore ?? null,
     }))
 
     slides.value = restoredSlides
@@ -689,6 +687,7 @@ export function useSlideshow() {
     estimatedSizeMB,
     activeSlideIndex,
     duplicateAnalysis,
+    qualityAnalysis,
     addFiles,
     dismissRejectedFilesNotice,
     removeSlide,

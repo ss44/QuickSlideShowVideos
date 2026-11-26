@@ -10,14 +10,21 @@ import {
   Minimize2,
   GripVertical,
   CopyMinus,
+  AlertTriangle,
 } from 'lucide-vue-next'
 import type {
   ComputedTimeline,
   DuplicateAnalysis,
+  ImageQualityAnalysis,
+  OutputConfig,
   SlideImage,
   SlideSortMode,
 } from '../types/slideshow'
 import { SLIDE_SORT_OPTIONS } from '../types/slideshow'
+import {
+  describeSlideQualityIssues,
+  formatQualityIssueBadgeLabel,
+} from '../engine/imageQualityAnalyzer'
 import { computeSlideSeekTimeSeconds } from '../engine/timeline'
 import { formatTime } from '../utils/formatters'
 
@@ -26,6 +33,8 @@ const props = defineProps<{
   timeline: ComputedTimeline
   activeSlideIndex: number
   duplicateAnalysis: DuplicateAnalysis
+  qualityAnalysis: ImageQualityAnalysis
+  output: OutputConfig
 }>()
 
 const emit = defineEmits<{
@@ -97,6 +106,35 @@ function isDuplicateSlide(slideId: string): boolean {
   return props.duplicateAnalysis.duplicateSlideIds.has(slideId)
 }
 
+function isQualityFlaggedSlide(slideId: string): boolean {
+  return props.qualityAnalysis.flaggedSlideIds.has(slideId)
+}
+
+function getQualityBadgeLabel(slideId: string): string {
+  const assessment = props.qualityAnalysis.assessmentBySlideId.get(slideId)
+  return assessment ? formatQualityIssueBadgeLabel(assessment) : ''
+}
+
+function getQualitySummaryTooltip(): string {
+  const { flaggedCount, lowResCount, blurryCount } = props.qualityAnalysis
+  const parts: string[] = []
+  if (lowResCount > 0) parts.push(`${lowResCount} low-res`)
+  if (blurryCount > 0) parts.push(`${blurryCount} blurry`)
+  const breakdown = parts.length > 0 ? ` (${parts.join(', ')})` : ''
+  return `${flaggedCount} ${flaggedCount === 1 ? 'photo' : 'photos'} may look soft at ${props.output.width}×${props.output.height}${breakdown} — click to inspect`
+}
+
+function jumpToNextFlaggedSlide() {
+  if (props.qualityAnalysis.flaggedCount === 0 || props.slides.length === 0) return
+  for (let offset = 1; offset <= props.slides.length; offset++) {
+    const candidateIndex = (props.activeSlideIndex + offset) % props.slides.length
+    if (isQualityFlaggedSlide(props.slides[candidateIndex].id)) {
+      emit('jumpTo', candidateIndex)
+      return
+    }
+  }
+}
+
 function getSlideSeekTimestampLabel(slideIndex: number): string | null {
   const seekTimeSeconds = computeSlideSeekTimeSeconds(props.timeline, slideIndex)
   return seekTimeSeconds === null ? null : formatTime(seekTimeSeconds)
@@ -105,13 +143,31 @@ function getSlideSeekTimestampLabel(slideIndex: number): string | null {
 function getSlideTooltip(slide: SlideImage, slideIndex: number): string {
   const timestampLabel = getSlideSeekTimestampLabel(slideIndex)
   const timestampSuffix = timestampLabel ? ` (${timestampLabel})` : ''
-  const copyCount = props.duplicateAnalysis.copyCountBySlideId.get(slide.id)
-  if (!copyCount) return `${slide.name}${timestampSuffix}`
-  const matchKind = props.duplicateAnalysis.matchKindBySlideId.get(slide.id)
-  if (matchKind === 'similar') {
-    return `${slide.name}${timestampSuffix} — Similar photo (${copyCount} matches)`
+  const details: string[] = []
+  if (slide.width > 0 && slide.height > 0) {
+    details.push(`${slide.width}×${slide.height}`)
   }
-  return `${slide.name}${timestampSuffix} — Exact duplicate (${copyCount} copies)`
+
+  const qualityAssessment = props.qualityAnalysis.assessmentBySlideId.get(slide.id)
+  if (qualityAssessment && qualityAssessment.issues.length > 0) {
+    details.push(describeSlideQualityIssues(slide, qualityAssessment, props.output))
+  }
+
+  const copyCount = props.duplicateAnalysis.copyCountBySlideId.get(slide.id)
+  if (copyCount) {
+    const matchKind = props.duplicateAnalysis.matchKindBySlideId.get(slide.id)
+    const isRemovable = props.duplicateAnalysis.removableDuplicateIds.has(slide.id)
+    const disposition = isRemovable ? 'will remove' : 'highest res, kept'
+    if (matchKind === 'similar') {
+      details.push(`Similar photo (${copyCount} matches · ${disposition})`)
+    } else {
+      details.push(`Exact duplicate (${copyCount} copies · ${disposition})`)
+    }
+  }
+
+  return details.length > 0
+    ? `${slide.name}${timestampSuffix} — ${details.join(' | ')}`
+    : `${slide.name}${timestampSuffix}`
 }
 
 function getSlideAriaLabel(slide: SlideImage, slideIndex: number): string {
@@ -127,13 +183,20 @@ function getDuplicateBadgeLabel(slideId: string): string {
 
 function getSlideCardBorderClass(slide: SlideImage, slideIndex: number): string {
   const isActive = slideIndex === props.activeSlideIndex
+  const isLowQuality = isQualityFlaggedSlide(slide.id)
   const isDuplicate = isDuplicateSlide(slide.id)
 
+  if (isLowQuality && isActive) {
+    return 'border-2 border-yellow-400 ring-2 ring-indigo-500/70'
+  }
+  if (isLowQuality) {
+    return 'border-2 border-yellow-400 ring-1 ring-yellow-400/35 hover:border-yellow-300'
+  }
   if (isDuplicate && isActive) {
-    return 'border-2 border-amber-400 ring-2 ring-indigo-500/70'
+    return 'border-2 border-amber-500 ring-2 ring-indigo-500/70'
   }
   if (isDuplicate) {
-    return 'border-2 border-amber-400/90 ring-1 ring-amber-500/30 hover:border-amber-300'
+    return 'border-2 border-amber-500/90 ring-1 ring-amber-500/30 hover:border-amber-400'
   }
   if (isActive) {
     return 'border border-indigo-500 ring-2 ring-indigo-500/40'
@@ -156,6 +219,17 @@ function getSlideCardBorderClass(slide: SlideImage, slideIndex: number): string 
         <span class="rounded-full bg-zinc-800 px-2 py-0.5 font-mono text-[11px] text-zinc-300">
           {{ props.slides.length }}
         </span>
+        <button
+          v-if="props.qualityAnalysis.flaggedCount > 0"
+          type="button"
+          class="inline-flex items-center gap-1 rounded-full border border-yellow-400/45 bg-yellow-400/15 px-2 py-0.5 text-[11px] font-medium text-yellow-300 transition hover:bg-yellow-400/25 hover:text-yellow-200"
+          :title="getQualitySummaryTooltip()"
+          @click="jumpToNextFlaggedSlide"
+        >
+          <AlertTriangle class="h-3 w-3 shrink-0 text-yellow-400" />
+          <span class="font-mono font-semibold">{{ props.qualityAnalysis.flaggedCount }}</span>
+          <span class="hidden sm:inline">low quality</span>
+        </button>
         <span v-if="props.slides.length > 1" class="hidden text-[11px] text-zinc-500 md:inline">
           Click to jump · Drag to reorder
         </span>
@@ -210,18 +284,11 @@ function getSlideCardBorderClass(slide: SlideImage, slideIndex: number): string 
               v-for="sortOption in SLIDE_SORT_OPTIONS"
               :key="sortOption.id"
               type="button"
-              class="block w-full px-3 py-2 text-left text-xs text-zinc-200 hover:bg-zinc-800 sm:py-1.5"
+              class="flex w-full items-center gap-1.5 px-3 py-2 text-left text-xs text-zinc-200 hover:bg-zinc-800 sm:py-1.5"
               @click="applySortMode(sortOption.id)"
             >
+              <Shuffle v-if="sortOption.id === 'random'" class="h-3 w-3 shrink-0 text-indigo-400" />
               {{ sortOption.label }}
-            </button>
-            <button
-              type="button"
-              class="flex w-full items-center gap-1.5 px-3 py-2 text-left text-xs text-zinc-200 hover:bg-zinc-800 sm:py-1.5"
-              @click="applySortMode('shuffle')"
-            >
-              <Shuffle class="h-3 w-3 text-indigo-400" />
-              Shuffle
             </button>
           </div>
         </div>
@@ -317,13 +384,24 @@ function getSlideCardBorderClass(slide: SlideImage, slideIndex: number): string 
           {{ slideIndex + 1 }}
         </span>
 
-        <!-- Duplicate Indicator Badge -->
-        <span
-          v-if="isDuplicateSlide(slide.id)"
-          class="pointer-events-none absolute right-1 bottom-1 rounded bg-amber-500/90 px-1.5 py-0.5 text-[9px] font-semibold tracking-wide text-zinc-950 uppercase shadow-xs"
+        <!-- Quality & Duplicate Indicator Badges -->
+        <div
+          v-if="isQualityFlaggedSlide(slide.id) || isDuplicateSlide(slide.id)"
+          class="pointer-events-none absolute right-1 bottom-1 flex items-center gap-0.5"
         >
-          {{ getDuplicateBadgeLabel(slide.id) }}
-        </span>
+          <span
+            v-if="getQualityBadgeLabel(slide.id)"
+            class="rounded bg-yellow-400 px-1.5 py-0.5 text-[9px] font-semibold tracking-wide text-zinc-950 uppercase shadow-xs"
+          >
+            {{ getQualityBadgeLabel(slide.id) }}
+          </span>
+          <span
+            v-if="isDuplicateSlide(slide.id)"
+            class="rounded bg-amber-500/90 px-1.5 py-0.5 text-[9px] font-semibold tracking-wide text-zinc-950 uppercase shadow-xs"
+          >
+            {{ getDuplicateBadgeLabel(slide.id) }}
+          </span>
+        </div>
 
         <!-- Drag Handle Indicator (desktop hover only; touch devices do not support HTML5 drag) -->
         <span

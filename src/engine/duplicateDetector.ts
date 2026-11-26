@@ -20,8 +20,11 @@ type SlideHashCandidate = Pick<SlideImage, 'id' | 'file' | 'size' | 'contentHash
 type SlideDuplicateCandidate = Pick<
   SlideImage,
   'id' | 'size' | 'width' | 'height' | 'contentHash' | 'perceptualFingerprint'
->
+> & { sharpnessScore?: number | null }
 type ContentHashCompletionCallback = (contentHash: string) => void
+
+/** Minimum sharpness delta required to break an exact pixel-resolution tie in favor of a sharper copy. */
+const EQUAL_RESOLUTION_SHARPNESS_TIEBREAK_DELTA = 5
 
 interface ContentHashJob {
   slide: SlideHashCandidate
@@ -51,6 +54,11 @@ function getPhashScratchContext(): CanvasRenderingContext2D | null {
   sharedPhashScratchCanvas.width = PHASH_SAMPLE_DIMENSION
   sharedPhashScratchCanvas.height = PHASH_SAMPLE_DIMENSION
   sharedPhashScratchCtx = sharedPhashScratchCanvas.getContext('2d', { willReadFrequently: true })
+  if (sharedPhashScratchCtx) {
+    // High-quality downsampling prevents aliasing differences between high-res originals and small copies
+    sharedPhashScratchCtx.imageSmoothingEnabled = true
+    sharedPhashScratchCtx.imageSmoothingQuality = 'high'
+  }
   return sharedPhashScratchCtx
 }
 
@@ -300,10 +308,11 @@ export function findSlidesRequiringHash<T extends Pick<SlideImage, 'size' | 'con
 
 /**
  * Chooses the best slide to keep inside a duplicate group:
- * prefers highest pixel resolution (`width * height`), breaks ties by largest file byte size,
- * and falls back to the earliest slide in current timeline order.
+ * 1. Always prefers the highest pixel resolution (`width * height`, with max-dimension tie-break).
+ * 2. When pixel resolutions are identical, prefers the noticeably sharper image (delta >= 5),
+ *    then the largest file byte size (less compression), and finally the earliest slide in timeline order.
  */
-function selectBestSlideIndexInGroup(
+export function selectBestSlideIndexInGroup(
   slides: ReadonlyArray<SlideDuplicateCandidate>,
   memberIndices: number[],
 ): number {
@@ -317,9 +326,36 @@ function selectBestSlideIndexInGroup(
     const bestPixelArea = bestSlide.width * bestSlide.height
     const candidatePixelArea = candidateSlide.width * candidateSlide.height
 
-    if (candidatePixelArea > bestPixelArea) {
-      bestIndex = candidateIndex
-    } else if (candidatePixelArea === bestPixelArea && candidateSlide.size > bestSlide.size) {
+    if (candidatePixelArea !== bestPixelArea) {
+      if (candidatePixelArea > bestPixelArea) {
+        bestIndex = candidateIndex
+      }
+      continue
+    }
+
+    const bestLongestSide = Math.max(bestSlide.width, bestSlide.height)
+    const candidateLongestSide = Math.max(candidateSlide.width, candidateSlide.height)
+    if (candidateLongestSide !== bestLongestSide) {
+      if (candidateLongestSide > bestLongestSide) {
+        bestIndex = candidateIndex
+      }
+      continue
+    }
+
+    const bestSharpness = bestSlide.sharpnessScore ?? null
+    const candidateSharpness = candidateSlide.sharpnessScore ?? null
+    if (
+      bestSharpness !== null &&
+      candidateSharpness !== null &&
+      Math.abs(candidateSharpness - bestSharpness) >= EQUAL_RESOLUTION_SHARPNESS_TIEBREAK_DELTA
+    ) {
+      if (candidateSharpness > bestSharpness) {
+        bestIndex = candidateIndex
+      }
+      continue
+    }
+
+    if (candidateSlide.size > bestSlide.size) {
       bestIndex = candidateIndex
     }
   }

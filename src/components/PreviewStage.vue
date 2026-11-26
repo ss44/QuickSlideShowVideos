@@ -19,6 +19,7 @@ import {
 } from 'lucide-vue-next'
 import type {
   ComputedTimeline,
+  ImageQualityAnalysis,
   MusicConfig,
   OutputConfig,
   SlideCropPosition,
@@ -27,6 +28,10 @@ import type {
 } from '../types/slideshow'
 import type { SavedProjectSummary } from '../types/project'
 import { BitmapCache } from '../engine/imageCache'
+import {
+  describeSlideQualityIssues,
+  formatQualityIssueBadgeLabel,
+} from '../engine/imageQualityAnalyzer'
 import {
   SlideshowRenderer,
   applyDragDeltaToCropPosition,
@@ -55,6 +60,7 @@ const props = defineProps<{
   isPlaying: boolean
   isMuted: boolean
   activeSlideIndex: number
+  qualityAnalysis: ImageQualityAnalysis
   savedProjects: SavedProjectSummary[]
   openingProjectId: string | null
   rejectedFilesNotice: string | null
@@ -235,6 +241,17 @@ const canvasCursorClass = computed(() => {
   if (isRepositioningCrop.value) return 'cursor-grabbing touch-none'
   if (canRepositionActiveSlide.value) return 'cursor-grab touch-none'
   return 'cursor-pointer'
+})
+
+const activeSlideQualityWarning = computed(() => {
+  const slide = activeSlide.value
+  if (!slide) return null
+  const assessment = props.qualityAnalysis.assessmentBySlideId.get(slide.id)
+  if (!assessment || assessment.issues.length === 0) return null
+  return {
+    label: formatQualityIssueBadgeLabel(assessment),
+    details: describeSlideQualityIssues(slide, assessment, props.output),
+  }
 })
 
 async function renderFrameAtTime(timeSeconds: number) {
@@ -856,34 +873,50 @@ defineExpose({ openFilePicker, clearBitmapCache })
             <span class="text-zinc-400">{{ props.output.width }}×{{ props.output.height }}</span>
           </div>
 
-          <!-- Top-right crop framing hint & reset control (Crop Fill mode only) -->
+          <!-- Top-right editor overlays (never rendered onto exported video) -->
           <div
-            v-if="canRepositionActiveSlide"
-            class="pointer-events-none absolute top-2 right-2 flex items-center gap-1.5 rounded-md bg-black/65 px-2 py-0.5 text-[10px] font-medium text-zinc-200 backdrop-blur-sm transition sm:top-3 sm:right-3 sm:gap-2 sm:px-2.5 sm:py-1 sm:text-[11px]"
-            :class="isRepositioningCrop ? 'ring-1 ring-indigo-400/70' : ''"
+            v-if="canRepositionActiveSlide || activeSlideQualityWarning"
+            class="pointer-events-none absolute top-2 right-2 flex flex-col items-end gap-1.5 sm:top-3 sm:right-3"
           >
-            <span class="inline-flex items-center gap-1 text-zinc-300">
-              <Move class="h-3 w-3 shrink-0 text-indigo-300" />
-              <span v-if="isRepositioningCrop">Reframing…</span>
-              <span v-else>
-                <span class="hidden sm:inline">Drag to reframe</span>
-                <span class="sm:hidden">Drag</span>
+            <!-- Crop framing hint & reset control (Crop Fill mode only) -->
+            <div
+              v-if="canRepositionActiveSlide"
+              class="flex items-center gap-1.5 rounded-md bg-black/65 px-2 py-0.5 text-[10px] font-medium text-zinc-200 backdrop-blur-sm transition sm:gap-2 sm:px-2.5 sm:py-1 sm:text-[11px]"
+              :class="isRepositioningCrop ? 'ring-1 ring-indigo-400/70' : ''"
+            >
+              <span class="inline-flex items-center gap-1 text-zinc-300">
+                <Move class="h-3 w-3 shrink-0 text-indigo-300" />
+                <span v-if="isRepositioningCrop">Reframing…</span>
+                <span v-else>
+                  <span class="hidden sm:inline">Drag to reframe</span>
+                  <span class="sm:hidden">Drag</span>
+                </span>
               </span>
-            </span>
-            <template v-if="isActiveSlideCropCustomized">
-              <span class="text-zinc-600">·</span>
-              <button
-                type="button"
-                class="pointer-events-auto inline-flex items-center gap-1 rounded px-1 py-0.5 text-indigo-300 transition hover:bg-indigo-500/20 hover:text-indigo-100"
-                title="Reset crop position to center"
-                aria-label="Reset crop position to center"
-                @pointerdown.stop
-                @click.stop="resetActiveSlideCrop"
-              >
-                <RotateCcw class="h-3 w-3" />
-                <span>Reset</span>
-              </button>
-            </template>
+              <template v-if="isActiveSlideCropCustomized">
+                <span class="text-zinc-600">·</span>
+                <button
+                  type="button"
+                  class="pointer-events-auto inline-flex items-center gap-1 rounded px-1 py-0.5 text-indigo-300 transition hover:bg-indigo-500/20 hover:text-indigo-100"
+                  title="Reset crop position to center"
+                  aria-label="Reset crop position to center"
+                  @pointerdown.stop
+                  @click.stop="resetActiveSlideCrop"
+                >
+                  <RotateCcw class="h-3 w-3" />
+                  <span>Reset</span>
+                </button>
+              </template>
+            </div>
+
+            <!-- Quality warning pill -->
+            <div
+              v-if="activeSlideQualityWarning"
+              :title="activeSlideQualityWarning.details"
+              class="pointer-events-auto flex items-center gap-1 rounded-md border border-yellow-400/50 bg-black/75 px-2 py-0.5 text-[10px] font-semibold text-yellow-300 backdrop-blur-sm sm:gap-1.5 sm:px-2.5 sm:py-1 sm:text-[11px]"
+            >
+              <AlertTriangle class="h-3 w-3 shrink-0 text-yellow-400" />
+              <span>{{ activeSlideQualityWarning.label }}</span>
+            </div>
           </div>
         </div>
       </div>

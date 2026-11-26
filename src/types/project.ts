@@ -26,6 +26,7 @@ export interface SavedSlideRecord {
   cropPosition?: SlideCropPosition
   contentHash: string | null
   perceptualFingerprint: PerceptualFingerprint | null
+  sharpnessScore?: number | null
 }
 
 export interface SavedMusicRecord {
