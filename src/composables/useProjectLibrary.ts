@@ -299,7 +299,12 @@ export function useProjectLibrary(bindings: ProjectLibraryBindings) {
   // Watch meaningful project state changes to track unsaved edits without deep-watching File/AudioBuffer internals
   watch(
     () => [
-      bindings.slides.value.map((slide) => `${slide.id}:${slide.rotation}`).join(','),
+      bindings.slides.value
+        .map(
+          (slide) =>
+            `${slide.id}:${slide.rotation}:${slide.cropPosition.offsetX.toFixed(4)}:${slide.cropPosition.offsetY.toFixed(4)}`,
+        )
+        .join(','),
       bindings.timing.slideDuration,
       bindings.timing.transitionDuration,
       bindings.timing.matchMusicLength,

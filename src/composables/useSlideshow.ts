@@ -4,6 +4,7 @@ import type {
   MusicConfig,
   MusicSourceType,
   OutputConfig,
+  SlideCropPosition,
   SlideImage,
   SlideRotationDegrees,
   SlideSortMode,
@@ -20,6 +21,7 @@ import type {
 } from '../types/project'
 import { RESOLUTION_PRESETS, TRANSITION_OPTIONS } from '../types/slideshow'
 import { thumbnailQueue } from '../engine/imageCache'
+import { clampCropOffset } from '../engine/renderer'
 import {
   DEFAULT_DUPLICATE_THRESHOLD_PERCENT,
   DUPLICATE_THRESHOLD_MAX_PERCENT,
@@ -72,6 +74,7 @@ function createSlideImageFromFile(file: File): SlideImage {
     height: 0,
     thumbnailUrl: null,
     rotation: 0,
+    cropPosition: { offsetX: 0, offsetY: 0 },
     contentHash: null,
     perceptualFingerprint: null,
   }
@@ -306,6 +309,20 @@ export function useSlideshow() {
     const targetSlide = slides.value.find((slide) => slide.id === slideId)
     if (!targetSlide) return
     targetSlide.rotation = (((targetSlide.rotation || 0) + 90) % 360) as SlideRotationDegrees
+    targetSlide.cropPosition = { offsetX: 0, offsetY: 0 }
+  }
+
+  function setSlideCropPosition(slideId: string, cropPosition: SlideCropPosition) {
+    const targetSlide = slides.value.find((slide) => slide.id === slideId)
+    if (!targetSlide) return
+    targetSlide.cropPosition = {
+      offsetX: clampCropOffset(cropPosition.offsetX),
+      offsetY: clampCropOffset(cropPosition.offsetY),
+    }
+  }
+
+  function resetSlideCropPosition(slideId: string) {
+    setSlideCropPosition(slideId, { offsetX: 0, offsetY: 0 })
   }
 
   function reorderSlides(fromIndex: number, toIndex: number) {
@@ -583,6 +600,10 @@ export function useSlideshow() {
       height: record.height || 0,
       thumbnailUrl: null,
       rotation: record.rotation || 0,
+      cropPosition: {
+        offsetX: clampCropOffset(record.cropPosition?.offsetX ?? 0),
+        offsetY: clampCropOffset(record.cropPosition?.offsetY ?? 0),
+      },
       contentHash: record.contentHash ?? null,
       perceptualFingerprint: record.perceptualFingerprint ?? null,
     }))
@@ -673,6 +694,8 @@ export function useSlideshow() {
     removeSlide,
     removeDuplicateSlides,
     rotateSlide,
+    setSlideCropPosition,
+    resetSlideCropPosition,
     reorderSlides,
     sortSlides,
     clearAllSlides,

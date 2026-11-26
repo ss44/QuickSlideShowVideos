@@ -39,6 +39,8 @@ const {
   removeSlide,
   removeDuplicateSlides,
   rotateSlide,
+  setSlideCropPosition,
+  resetSlideCropPosition,
   reorderSlides,
   sortSlides,
   clearAllSlides,
@@ -312,6 +314,8 @@ onBeforeUnmount(() => {
           @update:current-time="currentTime = $event"
           @update:is-playing="isPlaying = $event"
           @update:is-muted="isMuted = $event"
+          @update-slide-crop="setSlideCropPosition"
+          @reset-slide-crop="resetSlideCropPosition"
           @add-files="addFiles"
           @dismiss-rejected-files-notice="dismissRejectedFilesNotice"
           @open-saved-project="openSavedProject"

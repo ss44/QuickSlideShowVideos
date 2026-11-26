@@ -3,6 +3,7 @@ import type {
   MusicSourceType,
   OutputConfig,
   PerceptualFingerprint,
+  SlideCropPosition,
   SlideImage,
   SlideRotationDegrees,
   SmartEffectsConfig,
@@ -22,6 +23,7 @@ export interface SavedSlideRecord {
   width: number
   height: number
   rotation: SlideRotationDegrees
+  cropPosition?: SlideCropPosition
   contentHash: string | null
   perceptualFingerprint: PerceptualFingerprint | null
 }
