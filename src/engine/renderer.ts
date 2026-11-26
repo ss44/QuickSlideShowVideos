@@ -407,10 +407,15 @@ export class SlideshowRenderer {
   private outgoingScratchCtx: CanvasRenderingContext2D
   private incomingScratchCanvas: HTMLCanvasElement
   private incomingScratchCtx: CanvasRenderingContext2D
+  private vignetteCanvas = document.createElement('canvas')
   private blurScratchCanvas: HTMLCanvasElement
   private blurScratchCtx: CanvasRenderingContext2D
 
+  // Outside transitions the outgoing surface is free to hold the fully scaled backdrop.
+  private backdropKey: { bitmap: ImageBitmap; rotation: number; filter: string } | null = null
+
   constructor() {
+    this.vignetteCanvas.width = 0
     this.outgoingScratchCanvas = document.createElement('canvas')
     this.outgoingScratchCtx = this.outgoingScratchCanvas.getContext('2d', { alpha: false })!
     this.incomingScratchCanvas = document.createElement('canvas')
@@ -427,6 +432,7 @@ export class SlideshowRenderer {
       this.outgoingScratchCanvas.width !== width ||
       this.outgoingScratchCanvas.height !== height
     ) {
+      this.backdropKey = null
       this.outgoingScratchCanvas.width = width
       this.outgoingScratchCanvas.height = height
       this.incomingScratchCanvas.width = width
@@ -442,7 +448,8 @@ export class SlideshowRenderer {
   }
 
   /**
-   * Renders a single video frame at `timeSeconds` onto `targetCtx`.
+   * Renders one frame. Returns true when later timestamps on this slide have identical pixels
+   * with the same inputs (no remaining transition or camera motion).
    */
   renderFrame(
     targetCtx: CanvasRenderingContext2D,
@@ -463,7 +470,7 @@ export class SlideshowRenderer {
     const activeTimelineIndex = findSlideIndexAtTime(timeline, timeSeconds)
     if (activeTimelineIndex < 0) {
       targetCtx.restore()
-      return
+      return false
     }
 
     const currentTimelineSlide = timeline.slides[activeTimelineIndex]
@@ -481,6 +488,7 @@ export class SlideshowRenderer {
       elapsedInCurrentSlide < currentTimelineSlide.transitionInDuration
 
     if (isWithinIncomingTransition) {
+      this.backdropKey = null
       const previousTimelineIndex = activeTimelineIndex - 1
       const previousTimelineSlide = timeline.slides[previousTimelineIndex]
       const previousSlideImage = slides[previousTimelineSlide.slideIndex]
@@ -553,6 +561,7 @@ export class SlideshowRenderer {
         currentTimelineSlide,
         currentSlideProgress,
         currentSlideEffects,
+        true,
       )
     }
 
@@ -561,6 +570,7 @@ export class SlideshowRenderer {
     }
 
     targetCtx.restore()
+    return !!currentBitmap && !isWithinIncomingTransition && !currentSlideEffects.kenBurns
   }
 
   private drawSingleSlide(
@@ -572,6 +582,7 @@ export class SlideshowRenderer {
     timelineSlide: TimelineSlide,
     slideProgress: number,
     effects: SmartEffectsConfig,
+    cacheBackdrop = false,
   ) {
     targetCtx.save()
     targetCtx.fillStyle = CANVAS_BACKGROUND_COLOR
@@ -598,16 +609,28 @@ export class SlideshowRenderer {
     )
 
     if (needsBackdrop) {
-      this.renderBlurredBackdrop(
-        targetCtx,
-        canvasWidth,
-        canvasHeight,
-        imageBitmap,
-        orientedImageWidth,
-        orientedImageHeight,
-        rotationRadians,
-        colorFilter,
-      )
+      const cached = this.backdropKey
+      if (
+        !cacheBackdrop ||
+        cached?.bitmap !== imageBitmap ||
+        cached.rotation !== rotationRadians ||
+        cached.filter !== colorFilter
+      ) {
+        this.renderBlurredBackdrop(
+          cacheBackdrop ? this.outgoingScratchCtx : targetCtx,
+          canvasWidth,
+          canvasHeight,
+          imageBitmap,
+          orientedImageWidth,
+          orientedImageHeight,
+          rotationRadians,
+          colorFilter,
+        )
+        if (cacheBackdrop) {
+          this.backdropKey = { bitmap: imageBitmap, rotation: rotationRadians, filter: colorFilter }
+        }
+      }
+      if (cacheBackdrop) targetCtx.drawImage(this.outgoingScratchCanvas, 0, 0)
     }
 
     const kenBurnsTransform = computeKenBurnsTransform(
@@ -774,21 +797,27 @@ export class SlideshowRenderer {
   ) {
     targetCtx.save()
     targetCtx.globalAlpha = Math.max(0, Math.min(1, opacity))
-    const centerX = canvasWidth / 2
-    const centerY = canvasHeight / 2
-    const cornerRadius = Math.hypot(centerX, centerY)
-    const radialGradient = targetCtx.createRadialGradient(
-      centerX,
-      centerY,
-      cornerRadius * 0.42,
-      centerX,
-      centerY,
-      cornerRadius,
-    )
-    radialGradient.addColorStop(0, 'rgba(0,0,0,0)')
-    radialGradient.addColorStop(1, 'rgba(0,0,0,0.48)')
-    targetCtx.fillStyle = radialGradient
-    targetCtx.fillRect(0, 0, canvasWidth, canvasHeight)
+    if (this.vignetteCanvas.width !== canvasWidth || this.vignetteCanvas.height !== canvasHeight) {
+      this.vignetteCanvas.width = canvasWidth
+      this.vignetteCanvas.height = canvasHeight
+      const overlayCtx = this.vignetteCanvas.getContext('2d')!
+      const centerX = canvasWidth / 2
+      const centerY = canvasHeight / 2
+      const cornerRadius = Math.hypot(centerX, centerY)
+      const radialGradient = overlayCtx.createRadialGradient(
+        centerX,
+        centerY,
+        cornerRadius * 0.42,
+        centerX,
+        centerY,
+        cornerRadius,
+      )
+      radialGradient.addColorStop(0, 'rgba(0,0,0,0)')
+      radialGradient.addColorStop(1, 'rgba(0,0,0,0.48)')
+      overlayCtx.fillStyle = radialGradient
+      overlayCtx.fillRect(0, 0, canvasWidth, canvasHeight)
+    }
+    targetCtx.drawImage(this.vignetteCanvas, 0, 0)
     targetCtx.restore()
   }
 

@@ -456,6 +456,7 @@ async function encodeVideoFramesToMuxer(params: {
 
   try {
     let lastProgressReportTimeMs = 0
+    let staticSlideIndex: number | null = null
 
     for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
       if (signal.aborted) {
@@ -468,21 +469,24 @@ async function encodeVideoFramesToMuxer(params: {
       const frameTimeSeconds = frameIndex / output.fps
       const activeTimelineIndex = renderer.findSlideAtTime(timeline, frameTimeSeconds)
 
-      await exportBitmapCache.ensureSlideWindowLoaded(slides, timeline, activeTimelineIndex, {
-        lookaheadCount: 2,
-        awaitActiveBitmaps: true,
-      })
+      if (activeTimelineIndex !== staticSlideIndex) {
+        await exportBitmapCache.ensureSlideWindowLoaded(slides, timeline, activeTimelineIndex, {
+          lookaheadCount: 2,
+          awaitActiveBitmaps: true,
+        })
 
-      renderer.renderFrame(
-        renderCtx,
-        width,
-        height,
-        frameTimeSeconds,
-        timeline,
-        slides,
-        (slideId) => exportBitmapCache.getSync(slideId),
-        effects,
-      )
+        const isStatic = renderer.renderFrame(
+          renderCtx,
+          width,
+          height,
+          frameTimeSeconds,
+          timeline,
+          slides,
+          (slideId) => exportBitmapCache.getSync(slideId),
+          effects,
+        )
+        staticSlideIndex = isStatic ? activeTimelineIndex : null
+      }
 
       const timestampMicroseconds = Math.round((frameIndex * 1_000_000) / output.fps)
       const videoFrame = new VideoFrame(renderCanvas, {
