@@ -34,6 +34,42 @@ const COLOR_LOOK_FILTERS: Record<ColorLook, string> = {
   bw: 'grayscale(1) contrast(1.14)',
 }
 
+/**
+ * Computes normalized `[0, 1]` Ken Burns motion progress for the slide at `timelineIndex`
+ * across its entire visible lifespan: from its own `startTime` (including its incoming transition)
+ * through the end of the following slide's incoming transition (when this slide finishes exiting).
+ * Spanning the outgoing transition keeps the outgoing slide moving at constant velocity instead of
+ * freezing at `1.0` when `timeSeconds >= endTime`, while staying in `[0, 1]` so zoom-out and pan
+ * transforms never underscale below `1.0` or expose frame edges.
+ */
+export function computeSlideMotionProgress(
+  timeline: ComputedTimeline,
+  timelineIndex: number,
+  timeSeconds: number,
+): number {
+  const timelineSlide = timeline.slides[timelineIndex]
+  if (!timelineSlide) return 0
+
+  const nextTimelineSlide = timeline.slides[timelineIndex + 1]
+  const visibleEndTimeSeconds =
+    nextTimelineSlide &&
+    nextTimelineSlide.transitionIn !== 'cut' &&
+    nextTimelineSlide.transitionInDuration > 0
+      ? Math.max(
+          timelineSlide.endTime,
+          nextTimelineSlide.startTime + nextTimelineSlide.transitionInDuration,
+        )
+      : timelineSlide.endTime
+
+  const totalVisibleDurationSeconds = Math.max(
+    0.01,
+    visibleEndTimeSeconds - timelineSlide.startTime,
+  )
+  const elapsedVisibleSeconds = timeSeconds - timelineSlide.startTime
+
+  return Math.max(0, Math.min(1, elapsedVisibleSeconds / totalVisibleDurationSeconds))
+}
+
 interface KenBurnsTransform {
   scaleMultiplier: number
   offsetX: number
@@ -295,18 +331,20 @@ export class SlideshowRenderer {
       elapsedInCurrentSlide < currentTimelineSlide.transitionInDuration
 
     if (isWithinIncomingTransition) {
-      const previousTimelineSlide = timeline.slides[activeTimelineIndex - 1]
+      const previousTimelineIndex = activeTimelineIndex - 1
+      const previousTimelineSlide = timeline.slides[previousTimelineIndex]
       const previousSlideImage = slides[previousTimelineSlide.slideIndex]
       const previousBitmap = previousSlideImage ? getBitmapById(previousSlideImage.id) : null
 
-      const previousSlideProgress = Math.min(
-        1,
-        (timeSeconds - previousTimelineSlide.startTime) /
-          Math.max(0.01, previousTimelineSlide.duration),
+      const previousSlideProgress = computeSlideMotionProgress(
+        timeline,
+        previousTimelineIndex,
+        timeSeconds,
       )
-      const currentSlideProgress = Math.min(
-        1,
-        elapsedInCurrentSlide / Math.max(0.01, currentTimelineSlide.duration),
+      const currentSlideProgress = computeSlideMotionProgress(
+        timeline,
+        activeTimelineIndex,
+        timeSeconds,
       )
 
       this.drawSingleSlide(
@@ -344,9 +382,10 @@ export class SlideshowRenderer {
         easedTransitionProgress,
       )
     } else {
-      const currentSlideProgress = Math.min(
-        1,
-        elapsedInCurrentSlide / Math.max(0.01, currentTimelineSlide.duration),
+      const currentSlideProgress = computeSlideMotionProgress(
+        timeline,
+        activeTimelineIndex,
+        timeSeconds,
       )
       this.drawSingleSlide(
         targetCtx,
