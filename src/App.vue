@@ -320,6 +320,7 @@ onBeforeUnmount(() => {
 
         <Filmstrip
           :slides="slides"
+          :timeline="timeline"
           :active-slide-index="activeSlideIndex"
           :duplicate-analysis="duplicateAnalysis"
           @add-more="previewStageRef?.openFilePicker()"

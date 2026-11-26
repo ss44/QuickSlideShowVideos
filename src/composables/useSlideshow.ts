@@ -29,6 +29,7 @@ import {
   findSlidesRequiringHash,
 } from '../engine/duplicateDetector'
 import {
+  computeSlideSeekTimeSeconds,
   computeTimeline,
   estimateFileSizeMB,
   findSlideIndexAtTime,
@@ -475,14 +476,9 @@ export function useSlideshow() {
   }
 
   function jumpToSlide(slideIndex: number) {
-    const timelineSlide = timeline.value.slides[slideIndex]
-    if (!timelineSlide) return
-    // Seek just past the incoming transition so the selected slide is immediately visible
-    const postTransitionOffset = Math.min(
-      timelineSlide.transitionInDuration,
-      timelineSlide.duration * 0.4,
-    )
-    currentTime.value = timelineSlide.startTime + postTransitionOffset
+    const targetTimeSeconds = computeSlideSeekTimeSeconds(timeline.value, slideIndex)
+    if (targetTimeSeconds === null) return
+    currentTime.value = targetTimeSeconds
   }
 
   function captureProjectSnapshot(name: string, projectId?: string): ProjectSavePayload {

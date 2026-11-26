@@ -11,11 +11,19 @@ import {
   GripVertical,
   CopyMinus,
 } from 'lucide-vue-next'
-import type { DuplicateAnalysis, SlideImage, SlideSortMode } from '../types/slideshow'
+import type {
+  ComputedTimeline,
+  DuplicateAnalysis,
+  SlideImage,
+  SlideSortMode,
+} from '../types/slideshow'
 import { SLIDE_SORT_OPTIONS } from '../types/slideshow'
+import { computeSlideSeekTimeSeconds } from '../engine/timeline'
+import { formatTime } from '../utils/formatters'
 
 const props = defineProps<{
   slides: SlideImage[]
+  timeline: ComputedTimeline
   activeSlideIndex: number
   duplicateAnalysis: DuplicateAnalysis
 }>()
@@ -89,14 +97,28 @@ function isDuplicateSlide(slideId: string): boolean {
   return props.duplicateAnalysis.duplicateSlideIds.has(slideId)
 }
 
-function getSlideTooltip(slide: SlideImage): string {
+function getSlideSeekTimestampLabel(slideIndex: number): string | null {
+  const seekTimeSeconds = computeSlideSeekTimeSeconds(props.timeline, slideIndex)
+  return seekTimeSeconds === null ? null : formatTime(seekTimeSeconds)
+}
+
+function getSlideTooltip(slide: SlideImage, slideIndex: number): string {
+  const timestampLabel = getSlideSeekTimestampLabel(slideIndex)
+  const timestampSuffix = timestampLabel ? ` (${timestampLabel})` : ''
   const copyCount = props.duplicateAnalysis.copyCountBySlideId.get(slide.id)
-  if (!copyCount) return slide.name
+  if (!copyCount) return `${slide.name}${timestampSuffix}`
   const matchKind = props.duplicateAnalysis.matchKindBySlideId.get(slide.id)
   if (matchKind === 'similar') {
-    return `${slide.name} — Similar photo (${copyCount} matches)`
+    return `${slide.name}${timestampSuffix} — Similar photo (${copyCount} matches)`
   }
-  return `${slide.name} — Exact duplicate (${copyCount} copies)`
+  return `${slide.name}${timestampSuffix} — Exact duplicate (${copyCount} copies)`
+}
+
+function getSlideAriaLabel(slide: SlideImage, slideIndex: number): string {
+  const timestampLabel = getSlideSeekTimestampLabel(slideIndex)
+  return timestampLabel
+    ? `Jump to slide ${slideIndex + 1} (${slide.name}) at ${timestampLabel}`
+    : `Jump to slide ${slideIndex + 1} (${slide.name})`
 }
 
 function getDuplicateBadgeLabel(slideId: string): string {
@@ -135,7 +157,7 @@ function getSlideCardBorderClass(slide: SlideImage, slideIndex: number): string 
           {{ props.slides.length }}
         </span>
         <span v-if="props.slides.length > 1" class="hidden text-[11px] text-zinc-500 md:inline">
-          Drag thumbnails to reorder
+          Click to jump · Drag to reorder
         </span>
       </div>
 
@@ -249,9 +271,13 @@ function getSlideCardBorderClass(slide: SlideImage, slideIndex: number): string 
       <div
         v-for="(slide, slideIndex) in props.slides"
         :key="slide.id"
+        role="button"
+        tabindex="0"
         draggable="true"
-        :title="getSlideTooltip(slide)"
-        class="group relative shrink-0 cursor-pointer overflow-hidden rounded-lg bg-zinc-900 transition"
+        :title="getSlideTooltip(slide, slideIndex)"
+        :aria-label="getSlideAriaLabel(slide, slideIndex)"
+        :aria-current="slideIndex === props.activeSlideIndex ? 'true' : undefined"
+        class="group relative shrink-0 cursor-pointer overflow-hidden rounded-lg bg-zinc-900 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
         :class="[
           isGridExpanded ? 'aspect-[4/3] w-full' : 'h-18 w-24 md:h-24 md:w-32',
           getSlideCardBorderClass(slide, slideIndex),
@@ -261,6 +287,7 @@ function getSlideCardBorderClass(slide: SlideImage, slideIndex: number): string 
           draggedSlideIndex === slideIndex ? 'opacity-40' : '',
         ]"
         @click="emit('jumpTo', slideIndex)"
+        @keydown.enter.self.prevent="emit('jumpTo', slideIndex)"
         @dragstart="onDragStart($event, slideIndex)"
         @dragover="onDragOver($event, slideIndex)"
         @drop="onDrop($event, slideIndex)"
