@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Export Benchmark — Quick Slide Show</title>
+    <style>
+      body { font-family: ui-monospace, monospace; background: #09090b; color: #e4e4e7; padding: 16px; }
+    </style>
+  </head>
+  <body>
+    <h1>Export benchmark</h1>
+    <p>
+      Query params: <code>photos</code>, <code>slideSeconds</code>, <code>fps</code>, <code>width</code>,
+      <code>height</code>, <code>format</code> (mp4|webm),
+      <code>kenBurns</code> (1|0), <code>fitMode</code>, <code>uploadUrl</code>.
+    </p>
+    <pre id="log"></pre>
+    <script type="module" src="./exportBenchmark.ts"></script>
+  </body>
+</html>
