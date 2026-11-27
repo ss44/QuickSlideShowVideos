@@ -12,6 +12,7 @@ A fast, **100% In Browser Slide Show Maker** built with Vue 3, TypeScript, Canva
 - **Smart Effects** — **Blur Fill** backdrop for portrait/mixed-orientation photos, **Ken Burns** auto pan & zoom, **Beat Sync** (Web Audio beat detection), Color Looks, and Vignette.
 - **Music Support** — Upload MP3/WAV/M4A/OGG or load a CORS-enabled direct audio URL with Loop, Fade In/Out, Start Offset, Volume, and **Match Music Length**.
 - **Client-Side MP4 & WebM Export** — Hardware-accelerated WebCodecs encoding (`1080p`, `720p`, `4K`, `9:16 Vertical`, `1:1 Square`, `4:5 Portrait` at `30` or `60 fps`).
+- **Prepare export while idle** lets a background worker start the next export while the editor is idle. Preparation pauses during playback or interaction. Turn it off to release the cached video.
 
 | Smart Framing (Blur Fill) & Music | Local MP4 Export |
 | :---: | :---: |

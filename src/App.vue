@@ -9,6 +9,7 @@ import Filmstrip from './components/Filmstrip.vue'
 import ExportModal from './components/ExportModal.vue'
 import ProjectsModal from './components/ProjectsModal.vue'
 import WelcomeModal from './components/WelcomeModal.vue'
+import { useExportPreparation } from './composables/useExportPreparation'
 import { useSlideshow } from './composables/useSlideshow'
 import { usePwaInstall } from './composables/usePwaInstall'
 import { useProjectLibrary } from './composables/useProjectLibrary'
@@ -73,6 +74,11 @@ const isExportModalOpen = ref(false)
 const exportProgress = ref<ExportProgress | null>(null)
 const activeMobileSettingsSection = ref<SettingsSectionId | null>(null)
 let activeExportAbortController: AbortController | null = null
+
+const preparation = useExportPreparation(() => ({
+  slides: slides.value, timeline: timeline.value, effects, output,
+}), isPlaying)
+const { enabled: preparationEnabled, status: preparationStatus } = preparation
 
 function toggleMobileSettingsSection(sectionId: SettingsSectionId) {
   activeMobileSettingsSection.value =
@@ -143,7 +149,7 @@ function isEditableFormElement(target: EventTarget | null): boolean {
 }
 
 async function startExport() {
-  if (slides.value.length === 0) return
+  if (slides.value.length === 0 || activeExportAbortController) return
 
   // Pause live preview playback before starting offline WebCodecs render
   isPlaying.value = false
@@ -154,6 +160,7 @@ async function startExport() {
   const exportStartTimeMs = performance.now()
 
   try {
+    const onProgress = (update: ExportProgress) => { exportProgress.value = update }
     const exportResult = await exportSlideshowVideo({
       slides: slides.value,
       timeline: timeline.value,
@@ -161,9 +168,8 @@ async function startExport() {
       music: { ...music },
       output: { ...output },
       signal: activeExportAbortController.signal,
-      onProgress: (progressUpdate) => {
-        exportProgress.value = progressUpdate
-      },
+      acquirePreparedVideo: preparation.acquire(activeExportAbortController.signal, onProgress),
+      onProgress,
     })
 
     const blobUrl = URL.createObjectURL(exportResult.blob)
@@ -196,6 +202,7 @@ async function startExport() {
           : 'An unexpected error occurred during export.',
     }
   } finally {
+    preparation.finish()
     activeExportAbortController = null
   }
 }
@@ -268,6 +275,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  activeExportAbortController?.abort()
   window.removeEventListener('keydown', onGlobalKeyDown)
   revokePreviousExportBlobUrl()
 })
@@ -296,6 +304,14 @@ onBeforeUnmount(() => {
       @save-project="quickSaveProject"
       @open-projects="openProjectsModal"
     />
+
+    <div v-if="slides.length && preparation.supported" class="flex flex-wrap items-center gap-x-3 border-b border-zinc-800 px-4 py-1.5 text-xs">
+      <label class="inline-flex cursor-pointer items-center gap-2">
+        <input type="checkbox" class="accent-indigo-500" :checked="preparationEnabled" @change="preparation.toggle()" />
+        Prepare export while idle
+      </label>
+      <span class="text-zinc-400">{{ preparationStatus }}</span>
+    </div>
 
     <div class="relative flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
       <!-- Left/Center Workspace: Preview + Filmstrip -->

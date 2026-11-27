@@ -1,3 +1,4 @@
+import { createRenderCanvas, getRenderContext } from './renderCanvas'
 import { Muxer as Mp4Muxer, ArrayBufferTarget as Mp4Target } from 'mp4-muxer'
 import { Muxer as WebmMuxer, ArrayBufferTarget as WebmTarget } from 'webm-muxer'
 import type {
@@ -26,7 +27,7 @@ const MAX_AUDIO_ENCODE_QUEUE_SIZE = 16
 const MAX_VIDEO_ENCODE_QUEUE_SIZE = 12
 const PROGRESS_REPORT_INTERVAL_MS = 120
 
-interface VideoCodecSelection {
+export interface VideoCodecSelection {
   webCodecsCodec: string
   muxerCodec: 'avc' | 'V_VP9' | 'V_VP8'
 }
@@ -367,40 +368,37 @@ async function encodeAudioTrackToMuxer(params: {
   }
 }
 
-/**
- * Renders every frame onto an offscreen canvas via `SlideshowRenderer` and encodes into `containerMuxer`.
- */
-async function encodeVideoFramesToMuxer(params: {
+export interface VideoRenderInputs {
   slides: SlideImage[]
   timeline: ComputedTimeline
   effects: SmartEffectsConfig
   output: OutputConfig
-  width: number
-  height: number
-  totalFrames: number
-  bitrate: number
-  videoCodec: VideoCodecSelection
-  containerMuxer: MediaContainerMuxer
+}
+
+export interface EncodedVideo {
+  codec: VideoCodecSelection
+  chunks: BufferedVideoChunk[]
+}
+
+export async function encodeVideoFrames(params: VideoRenderInputs & {
   startTimeMs: number
   signal: AbortSignal
   onProgress: (progress: ExportProgress) => void
-}): Promise<void> {
+  beforeFrame?: (frameIndex: number) => Promise<void>
+  requireDecodedImages?: boolean
+  onChunkBytes?: (byteLength: number) => void
+}, videoCodec: VideoCodecSelection): Promise<BufferedVideoChunk[]> {
   const {
     slides,
     timeline,
     effects,
     output,
-    width,
-    height,
-    totalFrames,
-    bitrate,
-    videoCodec,
-    containerMuxer,
     startTimeMs,
     signal,
     onProgress,
   } = params
 
+  const { width, height, bitrate, totalFrames } = videoDimensions(output, timeline)
   let encoderError: Error | null = null
   const frameDurationMicroseconds = Math.round(1_000_000 / output.fps)
   const keyFrameIntervalFrames = output.fps * 2 // Insert an IDR keyframe every 2 seconds
@@ -414,6 +412,7 @@ async function encodeVideoFramesToMuxer(params: {
   const videoEncoder = new VideoEncoder({
     output: (chunk, meta) => {
       try {
+        params.onChunkBytes?.(chunk.byteLength)
         const data = new Uint8Array(chunk.byteLength)
         chunk.copyTo(data)
         const durationMicroseconds =
@@ -447,12 +446,20 @@ async function encodeVideoFramesToMuxer(params: {
     avc: output.format === 'mp4' ? { format: 'avc' } : undefined,
   })
 
-  const renderCanvas = document.createElement('canvas')
+  const renderCanvas = createRenderCanvas()
   renderCanvas.width = width
   renderCanvas.height = height
-  const renderCtx = renderCanvas.getContext('2d', { alpha: false })!
+  const renderCtx = getRenderContext(renderCanvas)
   const renderer = new SlideshowRenderer()
   const exportBitmapCache = new BitmapCache(6, Math.max(width, height))
+
+  const getBitmap = (slideId: string) => {
+    const bitmap = exportBitmapCache.getSync(slideId)
+    if (!bitmap && params.requireDecodedImages) {
+      throw new Error('Unable to decode a prepared slide.')
+    }
+    return bitmap
+  }
 
   try {
     let lastProgressReportTimeMs = 0
@@ -466,6 +473,7 @@ async function encodeVideoFramesToMuxer(params: {
         throw encoderError
       }
 
+      if (params.beforeFrame) await params.beforeFrame(frameIndex)
       const frameTimeSeconds = frameIndex / output.fps
       const activeTimelineIndex = renderer.findSlideAtTime(timeline, frameTimeSeconds)
 
@@ -482,7 +490,7 @@ async function encodeVideoFramesToMuxer(params: {
           frameTimeSeconds,
           timeline,
           slides,
-          (slideId) => exportBitmapCache.getSync(slideId),
+          getBitmap,
           effects,
         )
         staticSlideIndex = isStatic ? activeTimelineIndex : null
@@ -495,8 +503,11 @@ async function encodeVideoFramesToMuxer(params: {
       })
 
       const isKeyFrame = frameIndex % keyFrameIntervalFrames === 0
-      videoEncoder.encode(videoFrame, { keyFrame: isKeyFrame })
-      videoFrame.close()
+      try {
+        videoEncoder.encode(videoFrame, { keyFrame: isKeyFrame })
+      } finally {
+        videoFrame.close()
+      }
 
       // Enforce encoder queue backpressure so GPU/RAM usage remains flat on long exports
       while (
@@ -551,22 +562,8 @@ async function encodeVideoFramesToMuxer(params: {
     }
     if (encoderError) throw encoderError
 
-    const chunkSchedule = resolveVideoChunkSchedule(bufferedVideoChunks)
-    for (let index = 0; index < bufferedVideoChunks.length; index++) {
-      const chunk = bufferedVideoChunks[index]
-      const timing = chunkSchedule.timings[index]
-      containerMuxer.addVideoChunkRaw({
-        data: chunk.data,
-        type: chunk.type,
-        presentationTimestampMicroseconds: timing.presentationTimestampMicroseconds,
-        decodeTimestampMicroseconds: timing.decodeTimestampMicroseconds,
-        durationMicroseconds: chunk.durationMicroseconds,
-        compositionTimeOffsetMicroseconds: timing.compositionTimeOffsetMicroseconds,
-        meta: chunk.meta,
-      })
-    }
+    return bufferedVideoChunks
   } finally {
-    bufferedVideoChunks.length = 0
     exportBitmapCache.clear()
     try {
       if (videoEncoder.state !== 'closed') videoEncoder.close()
@@ -576,10 +573,43 @@ async function encodeVideoFramesToMuxer(params: {
   }
 }
 
+function muxVideoChunks(containerMuxer: MediaContainerMuxer, chunks: BufferedVideoChunk[]) {
+  const chunkSchedule = resolveVideoChunkSchedule(chunks)
+  for (let index = 0; index < chunks.length; index++) {
+    const chunk = chunks[index]
+    const timing = chunkSchedule.timings[index]
+    containerMuxer.addVideoChunkRaw({
+      data: chunk.data,
+      type: chunk.type,
+      presentationTimestampMicroseconds: timing.presentationTimestampMicroseconds,
+      decodeTimestampMicroseconds: timing.decodeTimestampMicroseconds,
+      durationMicroseconds: chunk.durationMicroseconds,
+      compositionTimeOffsetMicroseconds: timing.compositionTimeOffsetMicroseconds,
+      meta: chunk.meta,
+    })
+  }
+}
+
+function videoDimensions(output: OutputConfig, timeline: ComputedTimeline) {
+  // H.264 and VP9 require even dimensions.
+  return {
+    width: output.width - output.width % 2,
+    height: output.height - output.height % 2,
+    bitrate: getVideoBitrate(output),
+    totalFrames: Math.max(1, Math.ceil(timeline.totalDuration * output.fps)),
+  }
+}
+
+export function selectExportVideoCodec({ output, timeline }: VideoRenderInputs) {
+  const { width, height, bitrate } = videoDimensions(output, timeline)
+  return selectSupportedVideoCodec(output.format, width, height, output.fps, bitrate)
+}
+
 /**
  * Orchestrates full client-side slideshow export (audio mixing + WebCodecs encoding + MP4/WebM muxing).
  */
 export async function exportSlideshowVideo(params: {
+  acquirePreparedVideo?: () => Promise<EncodedVideo | null>
   slides: SlideImage[]
   timeline: ComputedTimeline
   effects: SmartEffectsConfig
@@ -600,11 +630,7 @@ export async function exportSlideshowVideo(params: {
     throw new Error('Add at least one photo before exporting.')
   }
 
-  // H.264 and VP9 encoders require even pixel dimensions
-  const evenWidth = output.width - (output.width % 2)
-  const evenHeight = output.height - (output.height % 2)
-  const totalFrames = Math.max(1, Math.ceil(timeline.totalDuration * output.fps))
-  const bitrate = getVideoBitrate(output)
+  const { width, height, totalFrames } = videoDimensions(output, timeline)
   const startTimeMs = performance.now()
 
   onProgress({
@@ -617,13 +643,6 @@ export async function exportSlideshowVideo(params: {
     message: 'Initializing video encoder…',
   })
 
-  const videoCodec = await selectSupportedVideoCodec(
-    output.format,
-    evenWidth,
-    evenHeight,
-    output.fps,
-    bitrate,
-  )
   const hasMusicBuffer = Boolean(music.audioBuffer)
   const audioCodec = hasMusicBuffer
     ? await selectSupportedAudioCodec(output.format, EXPORT_AUDIO_SAMPLE_RATE_HZ)
@@ -651,10 +670,13 @@ export async function exportSlideshowVideo(params: {
     throw new DOMException('Cancelled', 'AbortError')
   }
 
+  const prepared = await params.acquirePreparedVideo?.()
+  signal.throwIfAborted()
+  const videoCodec = prepared?.codec ?? await selectExportVideoCodec(params)
   const containerMuxer = createContainerMuxer({
     format: output.format,
-    width: evenWidth,
-    height: evenHeight,
+    width,
+    height,
     fps: output.fps,
     videoCodec,
     audioCodec,
@@ -670,21 +692,11 @@ export async function exportSlideshowVideo(params: {
     })
   }
 
-  await encodeVideoFramesToMuxer({
-    slides,
-    timeline,
-    effects,
-    output,
-    width: evenWidth,
-    height: evenHeight,
-    totalFrames,
-    bitrate,
-    videoCodec,
-    containerMuxer,
-    startTimeMs,
-    signal,
-    onProgress,
-  })
+  const chunks = prepared?.chunks ?? await encodeVideoFrames({
+    slides, timeline, effects, output, signal, startTimeMs, onProgress,
+  }, videoCodec)
+  signal.throwIfAborted()
+  muxVideoChunks(containerMuxer, chunks)
 
   const blob = containerMuxer.finalizeToBlob()
   const timestampLabel = new Date().toISOString().slice(0, 16).replace(/[T:]/g, '-')

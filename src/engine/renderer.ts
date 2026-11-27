@@ -1,3 +1,4 @@
+import { createRenderCanvas, getRenderContext, type RenderCanvas, type RenderContext } from './renderCanvas'
 import type {
   ColorLook,
   ComputedTimeline,
@@ -285,9 +286,9 @@ function shouldRenderBlurredBackdrop(
 }
 
 type TransitionComposer = (
-  targetCtx: CanvasRenderingContext2D,
-  outgoingCanvas: HTMLCanvasElement,
-  incomingCanvas: HTMLCanvasElement,
+  targetCtx: RenderContext,
+  outgoingCanvas: RenderCanvas,
+  incomingCanvas: RenderCanvas,
   canvasWidth: number,
   canvasHeight: number,
   easedProgress: number,
@@ -403,28 +404,28 @@ const TRANSITION_COMPOSERS: Record<TransitionType, TransitionComposer> = {
  * performs zero per-frame DOM allocations.
  */
 export class SlideshowRenderer {
-  private outgoingScratchCanvas: HTMLCanvasElement
-  private outgoingScratchCtx: CanvasRenderingContext2D
-  private incomingScratchCanvas: HTMLCanvasElement
-  private incomingScratchCtx: CanvasRenderingContext2D
-  private vignetteCanvas = document.createElement('canvas')
-  private blurScratchCanvas: HTMLCanvasElement
-  private blurScratchCtx: CanvasRenderingContext2D
+  private outgoingScratchCanvas: RenderCanvas
+  private outgoingScratchCtx: RenderContext
+  private incomingScratchCanvas: RenderCanvas
+  private incomingScratchCtx: RenderContext
+  private vignetteCanvas = createRenderCanvas()
+  private blurScratchCanvas: RenderCanvas
+  private blurScratchCtx: RenderContext
 
   // Outside transitions the outgoing surface is free to hold the fully scaled backdrop.
   private backdropKey: { bitmap: ImageBitmap; rotation: number; filter: string } | null = null
 
   constructor() {
     this.vignetteCanvas.width = 0
-    this.outgoingScratchCanvas = document.createElement('canvas')
-    this.outgoingScratchCtx = this.outgoingScratchCanvas.getContext('2d', { alpha: false })!
-    this.incomingScratchCanvas = document.createElement('canvas')
-    this.incomingScratchCtx = this.incomingScratchCanvas.getContext('2d', { alpha: false })!
+    this.outgoingScratchCanvas = createRenderCanvas()
+    this.outgoingScratchCtx = getRenderContext(this.outgoingScratchCanvas)
+    this.incomingScratchCanvas = createRenderCanvas()
+    this.incomingScratchCtx = getRenderContext(this.incomingScratchCanvas)
 
-    this.blurScratchCanvas = document.createElement('canvas')
+    this.blurScratchCanvas = createRenderCanvas()
     this.blurScratchCanvas.width = BLUR_SCRATCH_DIMENSION_PX
     this.blurScratchCanvas.height = BLUR_SCRATCH_DIMENSION_PX
-    this.blurScratchCtx = this.blurScratchCanvas.getContext('2d', { alpha: false })!
+    this.blurScratchCtx = getRenderContext(this.blurScratchCanvas)
   }
 
   private ensureScratchCanvasSize(width: number, height: number) {
@@ -452,7 +453,7 @@ export class SlideshowRenderer {
    * with the same inputs (no remaining transition or camera motion).
    */
   renderFrame(
-    targetCtx: CanvasRenderingContext2D,
+    targetCtx: RenderContext,
     canvasWidth: number,
     canvasHeight: number,
     timeSeconds: number,
@@ -574,7 +575,7 @@ export class SlideshowRenderer {
   }
 
   private drawSingleSlide(
-    targetCtx: CanvasRenderingContext2D,
+    targetCtx: RenderContext,
     canvasWidth: number,
     canvasHeight: number,
     imageBitmap: ImageBitmap | null,
@@ -665,7 +666,7 @@ export class SlideshowRenderer {
    * smoothing (~20x faster than applying a 24px Gaussian filter across a full 1080p/4K frame).
    */
   private renderBlurredBackdrop(
-    targetCtx: CanvasRenderingContext2D,
+    targetCtx: RenderContext,
     canvasWidth: number,
     canvasHeight: number,
     imageBitmap: ImageBitmap,
@@ -717,7 +718,7 @@ export class SlideshowRenderer {
   }
 
   private renderForegroundPhoto(
-    targetCtx: CanvasRenderingContext2D,
+    targetCtx: RenderContext,
     canvasWidth: number,
     canvasHeight: number,
     imageBitmap: ImageBitmap,
@@ -790,7 +791,7 @@ export class SlideshowRenderer {
   }
 
   private renderVignetteOverlay(
-    targetCtx: CanvasRenderingContext2D,
+    targetCtx: RenderContext,
     canvasWidth: number,
     canvasHeight: number,
     opacity: number,
@@ -800,7 +801,7 @@ export class SlideshowRenderer {
     if (this.vignetteCanvas.width !== canvasWidth || this.vignetteCanvas.height !== canvasHeight) {
       this.vignetteCanvas.width = canvasWidth
       this.vignetteCanvas.height = canvasHeight
-      const overlayCtx = this.vignetteCanvas.getContext('2d')!
+      const overlayCtx = getRenderContext(this.vignetteCanvas, true)
       const centerX = canvasWidth / 2
       const centerY = canvasHeight / 2
       const cornerRadius = Math.hypot(centerX, centerY)
@@ -822,7 +823,7 @@ export class SlideshowRenderer {
   }
 
   private composeTransition(
-    targetCtx: CanvasRenderingContext2D,
+    targetCtx: RenderContext,
     canvasWidth: number,
     canvasHeight: number,
     transitionType: TransitionType,
